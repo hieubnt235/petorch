@@ -1,0 +1,59 @@
+[project]
+name = "petorch"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "hieu", email = "hieu.buinguyen2352001@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "accelerate>=1.8.1",
+    "bitsandbytes>=0.46.1",
+    "black>=25.1.0",
+    "datasets>=4.0.0",
+    "diffusers>=0.34.0",
+    #"flash-attn>=2.8.1",
+    "ipywidgets>=8.1.7",
+    "lightning>=2.5.2",
+    "loguru>=0.7.3",
+    "matplotlib>=3.10.3",
+    "mlflow>=3.1.4",
+    "notebook>=7.4.4",
+    "peft>=0.16.0",
+    "pydantic>=2.11.7",
+    "pytest>=8.4.1",
+    "setuptools>=80.9.0",
+    "torch>=2.7.1",
+    "torchao>=0.12.0",
+    "torchmetrics[image]>=1.7.4",
+    "torchvision>=0.22.1",
+    "transformers>=4.53.2",
+    "trl>=0.19.1",
+    "wheel>=0.45.1",
+]
+
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+#[tool.setuptools.packages.find]
+#where = ["src"]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+#ds-utils = { git = "https://github.com/hieubnt235/ds-utils.git" }
+
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.pytest.ini_options]
+#testpaths = "tests"
+filterwarnings = [
+    "error::DeprecationWarning",
+]
