@@ -80,7 +80,7 @@ class LoraLinearAdapter(BaseAdapter):
             Tensor with shape (base_layer.out_features, base_layer.in_features)
         """
         delta_weight = (self.lora_B.weight @ self.lora_A.weight) * self.scaling
-        assert delta_weight.shape == self.base_layer.weight.data.shape
+        assert delta_weight.shape == self.base_layer.weight.shape
         return delta_weight
 
     def get_delta_bias(self) -> torch.Tensor | None:
@@ -138,10 +138,10 @@ class LoraLinearAdaptedLayer(BaseAdaptedLayer):
                 assert self.base_layer == adapter.base_layer
 
                 base_layer = cast(nn.Linear, self.base_layer)
-                base_layer.weight.data += adapter.get_delta_weight()
+                base_layer.weight += adapter.get_delta_weight()
 
                 if (delta_bias := adapter.get_delta_bias()) is not None:
-                    base_layer.bias.data += delta_bias
+                    base_layer.bias += delta_bias
                 self._merged_adapter_names.append(name)
 
     def _unmerge(
@@ -161,8 +161,8 @@ class LoraLinearAdaptedLayer(BaseAdaptedLayer):
             assert isinstance(adapter, LoraLinearAdapter)
 
             base_layer = cast(nn.Linear, self.base_layer)
-            base_layer.weight.data -= adapter.get_delta_weight()
+            base_layer.weight -= adapter.get_delta_weight()
 
             if (delta_bias := adapter.get_delta_bias()) is not None:
-                base_layer.bias.data -= delta_bias
+                base_layer.bias -= delta_bias
             self._merged_adapter_names.remove(name)
