@@ -6,7 +6,9 @@ import torch
 from torch import Tensor
 
 from petorch.adapter import BaseAdapter, AdapterAPI, BaseAdaptedLayer
-from petorch.prebuilt.dummy import NestedDummy, Dummy, DummyModelConfig, DummyAdapter
+from petorch.dummy import NestedDummy, Dummy
+from petorch.prebuilt.configs import LoraLinearModelConfig
+from petorch.prebuilt.lora import LoraLinearAdapter
 
 
 @pytest.mark.parametrize("model_cls", [NestedDummy, Dummy])
@@ -14,7 +16,7 @@ def test_api(model_cls):
     adapter_name = "test_adapter"
     model = model_cls()
     org_model = deepcopy(model)
-    config = DummyModelConfig(adapter_name=adapter_name)
+    config = LoraLinearModelConfig(adapter_name=adapter_name)
 
     sample = torch.rand([2, 3, 8, 8])
 
@@ -60,7 +62,8 @@ def test_api(model_cls):
     # --update_adapter--
     # noinspection PyTypeChecker
     assert isinstance(
-        (activated_adapter := adapted_layer.active_adapters[adapter_name]), DummyAdapter
+        (activated_adapter := adapted_layer.active_adapters[adapter_name]),
+        LoraLinearAdapter,
     )
 
     # Test that base_layer is not the module of adapter
@@ -90,7 +93,9 @@ def test_api(model_cls):
 
     # --remove_adapter--
     with pytest.raises(ValueError, match="does not have adapter named"):
-        AdapterAPI.remove_adapter(model, [adapter_name, "another_not_added_adapter_name"])
+        AdapterAPI.remove_adapter(
+            model, [adapter_name, "another_not_added_adapter_name"]
+        )
 
     # Adapter is still not change after remove fail
     assert not torch.all(output1 == model(sample))

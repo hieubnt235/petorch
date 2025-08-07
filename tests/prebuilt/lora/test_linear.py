@@ -3,7 +3,7 @@ import torch
 from torch import nn
 
 from petorch.prebuilt.configs import LoraLinearModelConfig
-from petorch.prebuilt.lora import LoraLinearAdaptedLayer
+from petorch.prebuilt.lora import LoraLinearAdaptedLayer, LoraLinearAdapter
 from petorch.utilities import TorchInitMethod
 
 adapter_name = "test_prebuild_linear_lora_adapter"
@@ -35,7 +35,9 @@ def test_lora_linear(config, base_layer_bias, dropout, sample):
     ones_init_adapter = config.dispatch_adapter(
         fqname, base_layer, lora_init_method=TorchInitMethod.ones
     )
-
+    assert isinstance(zero_init_adapter, LoraLinearAdapter)
+    assert isinstance(ones_init_adapter, LoraLinearAdapter)
+    
     # ---Zero init---
     adapted_layer._add_adapters(zero_init_adapter, activate=False)
     adapted_layer.eval()  # IMPORTANT: MUST SWAP TO EVAL AFTER CHANGE ARCHITECTURE.
