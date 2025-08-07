@@ -87,7 +87,7 @@ def test_api(model_cls):
         new_config.alpha = 64
         new_config.adapter_name = "new_adapter_name"
         AdapterAPI.update_adapter(model, new_config)
-    # If update fail, config hold the same, test with old config
+    # If update fails, config will be the same, test it with old config.
     assert activated_adapter.scaling == cal_scaling(activated_adapter, config)
     assert activated_adapter.scaling != cal_scaling(activated_adapter, new_config)
 
@@ -104,3 +104,7 @@ def test_api(model_cls):
     AdapterAPI.remove_adapter(model, [adapter_name])
     assert torch.all(output1 == model(sample))
     assert AdapterAPI.get_adapter_names(model) is None
+    
+@pytest.mark.parametrize("model_cls", [NestedDummy, Dummy])
+def test_merge_api():
+    pass

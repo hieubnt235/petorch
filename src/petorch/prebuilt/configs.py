@@ -19,10 +19,11 @@ class LoraLinearModelConfig(BaseAdaptedModelConfig):
     alpha: PositiveInt = 16
     dropout: NonNegativeFloat = 0.1
     bias: bool = False
-
+    scale: PositiveInt = 1
+    
     def dispatch_adapter(
         self,
-        fpname: str,
+        fqname: str,
         base_layer: nn.Module,
         *args,
         lora_init_method: TorchInitMethod | Callable | None = None,
@@ -48,6 +49,6 @@ class LoraLinearModelConfig(BaseAdaptedModelConfig):
         return None
 
     def dispatch_adapted_layer(
-        self, fpname: str, base_layer: nn.Module, *args, **kwargs
+        self, fqname: str, base_layer: nn.Module, *args, **kwargs
     ) -> BaseAdaptedLayer:
         return LoraLinearAdaptedLayer(base_layer,*args,**kwargs)

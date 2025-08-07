@@ -1,5 +1,5 @@
 from copy import deepcopy
-from typing import Sequence, cast, Unpack
+from typing import Sequence, cast, Unpack, Any
 
 import torch
 from pydantic import BaseModel
@@ -118,7 +118,7 @@ class AdapterAPI:
         for fqname, adapted_layer, adapter, is_adapted_layer in layer_collections:
             adapted_layer._add_adapters(adapter)
 
-            # If new AdaptedLayer created, swap base layer with it.
+            # If a new AdaptedLayer created, swap base layer with it.
             if not is_adapted_layer:
                 model.set_submodule(fqname, adapted_layer)
 
@@ -194,7 +194,7 @@ class AdapterAPI:
                     raise ValueError(f"Model does not have adapter named `{adt_name}`.")
         else:
             adapter_names = adt_names
-
+        assert len(adapter_names) > 0  # Not allow blank list
         return adapter_names
 
     @staticmethod
@@ -323,13 +323,43 @@ class AdapterAPI:
             delattr(model, __ADT_NAMES_ATTR__)
 
     @staticmethod
-    @torch.no_grad
-    def merge(model, adapter_names: str | list[str] | None = None):
-        
-        adapter_names = AdapterAPI.resolve_adapter_names(model, adapter_names)
-        # TODO
+    @torch.no_grad()
+    def merge(
+        model: nn.Module, adapter_names: str | list[str] | None = None, *args, **kwargs
+    ):
+        return AdapterAPI._merge_or_unmerge(
+            model, adapter_names, *args, merge=True, **kwargs
+        )
 
     @staticmethod
     @torch.no_grad()
-    def unmerge(model, adapter_names: str | list[str] | None = None):
-        pass
+    def unmerge(
+        model: nn.Module, adapter_names: str | list[str] | None = None, *args, **kwargs
+    ):
+        return AdapterAPI._merge_or_unmerge(
+            model, adapter_names, *args, merge=False, **kwargs
+        )
+
+    @staticmethod
+    def _merge_or_unmerge(
+        model: nn.Module,
+        adapter_names: str | list[str] | None = None,
+        *args,
+        merge: bool,
+        **kwargs,
+    ) -> Any:
+        adapter_names = AdapterAPI.resolve_adapter_names(model, adapter_names)
+        merge_fqname: list[str] = []
+
+        for fqname, layer in model.named_modules():
+            if isinstance(layer, BaseAdaptedLayer):
+                merge_fqname.append(fqname)
+        assert len(merge_fqname) > 0
+
+        for fqname in merge_fqname:
+            layer = model.get_submodule(fqname)
+            assert isinstance(layer, BaseAdaptedLayer)
+            if merge:
+                return layer._merge(adapter_names, *args, **kwargs)
+            else:
+                return layer._unmerge(adapter_names, *args, **kwargs)
