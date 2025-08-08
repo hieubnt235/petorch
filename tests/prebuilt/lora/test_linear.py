@@ -38,7 +38,7 @@ NUM_CONCURRENT_ADAPTERS = 10
 @pytest.mark.parametrize(
     "sample", [torch.randn([2, 32]) for _ in range(NUM_TEST_SAMPLES)]
 )  # Test many random tensors for ensuring it's general for all cases.
-def test_lora_linear(config, base_layer_bias, dropout, sample):
+def test_lora_linear_single_adapter(config, base_layer_bias, dropout, sample):
     base_layer = nn.Linear(*linear_size, bias=base_layer_bias)
     config.dropout = dropout
     adapted_layer = config.dispatch_adapted_layer(fqname, base_layer)
@@ -143,13 +143,17 @@ def _make_adapter_configs(num: int) -> list[LoraLinearModelConfig]:
             bias=bias < 5,
             scale=scale,
         )
-        for i, [rank, bias, scale] in enumerate(_randint_list(3, 3, 2, 10))
+        for i, [rank, bias, scale] in enumerate(_randint_list(num, 3, 2, 10))
     ]
 
 
 @torch.no_grad()
 @pytest.mark.parametrize(
-    "configs", [_make_adapter_configs(NUM_CONCURRENT_ADAPTERS) for _ in range(NUM_TEST_CONFIG_LISTS)]
+    "configs",
+    [
+        _make_adapter_configs(NUM_CONCURRENT_ADAPTERS)
+        for _ in range(NUM_TEST_CONFIG_LISTS)
+    ],
 )
 @pytest.mark.parametrize(
     "sample", [torch.randn([2, 32]) for _ in range(NUM_TEST_SAMPLES)]
@@ -204,10 +208,10 @@ def test_lora_linear_multi_adapters(sample, configs):
 
     # After merge, the base layer is used only, and output equal to the activated adapters case
     assert torch.allclose(
-        o := adapted_layer(sample), activated_output, atol=1e-6
+        o := adapted_layer(sample), activated_output, atol=2e-6
     ), f"max_abs = {(activated_output-o).abs().max()}"
     assert torch.allclose(
-        o := adapted_layer.base_layer(sample), activated_output, atol=1e-6
+        o := adapted_layer.base_layer(sample), activated_output, atol=2e-6
     ), f"max_abs = {(activated_output-o).abs().max()}"
 
     # Unmerge

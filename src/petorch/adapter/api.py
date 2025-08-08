@@ -15,7 +15,6 @@ from .base import (
 __ADT_NAMES_ATTR__ = "__PETORCH_ADAPTER_NAMES_ATTRIBUTE_NAME__"
 
 
-# todo: adapter_names = None means all adapter.
 class AdapterAPI:
     class __AdapterNameList__:
         """
@@ -83,11 +82,37 @@ class AdapterAPI:
                     f"Adapter named `{config.adapter_name}` already added to the model."
                 )
 
+        def is_wrapped_by_adapted_layer(model, fqname: str) -> bool:
+            splits = fqname.split(".")
+            for i, _ in enumerate(splits):
+                fqn = ".".join(splits[:i])
+                if isinstance(model.get_submodule(fqn), BaseAdaptedLayer):
+                    return True
+            return False
+
         # Collect
         layer_collections = []
         adapted_fqnames: list[str] = []  # Return module path for debug
         for fqname, layer in model.named_modules():
+            # Only collect BaseAdaptedLayer, or layer satisfies conditions:
+            # 1. Not be wrapped by another BaseAdaptedLayer.
+            # 2. config.dispatch_adapter return BaseAdapter.
+            # 3. Returned adapter pass adapted_layer._validate_adapter.
+
+            # Also ensure that no nested adapted layer happened.
+
             is_adapted_layer = isinstance(layer, BaseAdaptedLayer)
+
+            # Skip all non-BaseAdaptedLayer layers that wrapped by BaseAdaptedLayer.
+            if not is_adapted_layer:
+                if is_wrapped_by_adapted_layer(model, fqname):
+                    continue
+            else:
+                # If the layer is BaseAdaptedLayer, The parents must not BaseAdaptedLayer.
+                assert not is_wrapped_by_adapted_layer(
+                    model, fqname
+                ), f"Nested Adapted layer detected. fqname={fqname}"
+
             base_layer = layer.base_layer if is_adapted_layer else layer
 
             if (
@@ -103,7 +128,7 @@ class AdapterAPI:
                 )
                 assert isinstance(adapted_layer, BaseAdaptedLayer)
 
-                # Check if new adapter is valid for the layer
+                # Check if the new adapter is valid for the layer
                 adapter = adapted_layer._validate_adapter(adapter, *args, **kwargs)
                 assert isinstance(
                     adapter, BaseAdapter
@@ -116,9 +141,9 @@ class AdapterAPI:
 
         # Modify
         for fqname, adapted_layer, adapter, is_adapted_layer in layer_collections:
-            adapted_layer._add_adapters(adapter)
+            adapted_layer._add_adapters(adapter, activate=False)
 
-            # If a new AdaptedLayer created, swap base layer with it.
+            # If a new AdaptedLayer created, swap the base layer with it.
             if not is_adapted_layer:
                 model.set_submodule(fqname, adapted_layer)
 
@@ -131,6 +156,7 @@ class AdapterAPI:
             else:
                 getattr(model, __ADT_NAMES_ATTR__).append(config.adapter_name)
 
+        model.train(model.training)
         return adapted_fqnames
 
     @staticmethod
@@ -163,6 +189,7 @@ class AdapterAPI:
                 f"Model does not have adapter named `{config.adapter_name}`."
             )
 
+        # Loop for all BaseAdaptedLayers
         for fqname, layer in model.named_modules():
             if not isinstance(layer, BaseAdaptedLayer):
                 continue
@@ -175,27 +202,7 @@ class AdapterAPI:
 
         # There must be at least one layer be updated.
         assert len(updated_layers) > 0
-
-    @staticmethod
-    def resolve_adapter_names(
-        model: nn.Module, adapter_names: str | list[str] | None = None
-    ) -> list[str]:
-        if (adt_names := AdapterAPI.get_adapter_names(model)) is None:
-            raise ValueError(f"Model does not have any adapter.")
-
-        if adapter_names is not None:
-            adapter_names = (
-                [adapter_names]
-                if isinstance(adapter_names, str)
-                else list(adapter_names)
-            )
-            for adt_name in adapter_names:
-                if adt_name not in adt_names:
-                    raise ValueError(f"Model does not have adapter named `{adt_name}`.")
-        else:
-            adapter_names = adt_names
-        assert len(adapter_names) > 0  # Not allow blank list
-        return adapter_names
+        model.train(model.training)
 
     @staticmethod
     @torch.no_grad()
@@ -223,9 +230,9 @@ class AdapterAPI:
         not_change_adapters: set[str] = set()
         not_found_adapters: set[str] = set()
 
-        adapter_names = AdapterAPI.resolve_adapter_names(model, adapter_names)
+        adapter_names = AdapterAPI._resolve_adapter_names(model, adapter_names)
 
-        # Collect fqnames
+        # Collect fqnames of BaseAdaptedLayers
         activate_fqnames: list[str] = []
         for fqname, layer in model.named_modules():
             if isinstance(layer, BaseAdaptedLayer):
@@ -262,6 +269,7 @@ class AdapterAPI:
         for c_adt in change_adapters:
             assert c_adt not in not_change_adapters
 
+        model.train(model.training)
         return list(change_adapters)
 
     @staticmethod
@@ -281,13 +289,13 @@ class AdapterAPI:
 
         """
 
-        adapter_names = AdapterAPI.resolve_adapter_names(model, adapter_names)
+        adapter_names = AdapterAPI._resolve_adapter_names(model, adapter_names)
 
         not_found_adapter_names = (
             {adapter_names} if isinstance(adapter_names, str) else set(adapter_names)
         )
 
-        # Collect fqnames
+        # Collect fqnames of BaseAdaptedLayers
         remove_fqnames: list[str] = []
         for fqname, layer in model.named_modules():
             if isinstance(layer, BaseAdaptedLayer):
@@ -322,12 +330,14 @@ class AdapterAPI:
         if len(_adapter_name_list._private_list) == 0:
             delattr(model, __ADT_NAMES_ATTR__)
 
+        model.train(model.training)
+
     @staticmethod
     @torch.no_grad()
     def merge(
         model: nn.Module, adapter_names: str | list[str] | None = None, *args, **kwargs
     ):
-        return AdapterAPI._merge_or_unmerge(
+        return AdapterAPI._merge_or_unmerge_(
             model, adapter_names, *args, merge=True, **kwargs
         )
 
@@ -336,30 +346,56 @@ class AdapterAPI:
     def unmerge(
         model: nn.Module, adapter_names: str | list[str] | None = None, *args, **kwargs
     ):
-        return AdapterAPI._merge_or_unmerge(
+        return AdapterAPI._merge_or_unmerge_(
             model, adapter_names, *args, merge=False, **kwargs
         )
 
     @staticmethod
-    def _merge_or_unmerge(
+    def _merge_or_unmerge_(
         model: nn.Module,
         adapter_names: str | list[str] | None = None,
         *args,
         merge: bool,
         **kwargs,
     ) -> Any:
-        adapter_names = AdapterAPI.resolve_adapter_names(model, adapter_names)
-        merge_fqname: list[str] = []
+        """Not call this method directly, it does not ensure for no_grad."""
+        adapter_names = AdapterAPI._resolve_adapter_names(model, adapter_names)
+        merge_fqnames: list[str] = []
 
+        # Collect first for avoiding the case that _merge implementation change the architecture.
         for fqname, layer in model.named_modules():
             if isinstance(layer, BaseAdaptedLayer):
-                merge_fqname.append(fqname)
-        assert len(merge_fqname) > 0
+                merge_fqnames.append(fqname)
+        assert len(merge_fqnames) > 0
 
-        for fqname in merge_fqname:
+        for fqname in merge_fqnames:
             layer = model.get_submodule(fqname)
             assert isinstance(layer, BaseAdaptedLayer)
             if merge:
-                return layer._merge(adapter_names, *args, **kwargs)
+                layer._merge(adapter_names, *args, **kwargs)
             else:
-                return layer._unmerge(adapter_names, *args, **kwargs)
+                layer._unmerge(adapter_names, *args, **kwargs)
+
+            layer._validate_after_merge_or_unmerge(*args,**kwargs)
+        model.train(model.training)
+
+    @staticmethod
+    def _resolve_adapter_names(
+        model: nn.Module, adapter_names: str | list[str] | None = None
+    ) -> list[str]:
+        if (adt_names := AdapterAPI.get_adapter_names(model)) is None:
+            raise ValueError(f"Model does not have any adapter.")
+
+        if adapter_names is not None:
+            adapter_names = (
+                [adapter_names]
+                if isinstance(adapter_names, str)
+                else list(adapter_names)
+            )
+            for adt_name in adapter_names:
+                if adt_name not in adt_names:
+                    raise ValueError(f"Model does not have adapter named `{adt_name}`.")
+        else:
+            adapter_names = adt_names
+        assert len(adapter_names) > 0  # Not allow blank list
+        return adapter_names

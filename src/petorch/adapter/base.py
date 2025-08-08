@@ -3,6 +3,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Sequence, cast, Any, TypedDict, Type, Unpack
 
+import torch
 from pydantic import BaseModel, ConfigDict, Field
 from torch import nn
 
@@ -162,7 +163,7 @@ class BaseAdapter(nn.Module):
 class BaseAdaptedLayer(nn.Module, ABC):
     """
     This class will wrap original layer with `Adapters`, and then replace the original layer to this.
-    
+
     This class must not exist without any adapter. It will be replaced to the base layer when no adapter in it.
 
     Subclass should define these methods:
@@ -175,7 +176,7 @@ class BaseAdaptedLayer(nn.Module, ABC):
 
     """
 
-    def __init__(self, base_layer: nn.Module):
+    def __init__(self, base_layer: nn.Module, *args, **kwargs):
         super().__init__()
 
         self.base_layer = base_layer
@@ -187,12 +188,12 @@ class BaseAdaptedLayer(nn.Module, ABC):
 
     # ---Abstract---
     @abstractmethod
-    def forward(self, *args, **kwargs)->Any:
+    def forward(self, *args, **kwargs) -> Any:
         """
         This method will never be called when there's no adapter.
         So that it should check `assert len(self.adapter_names) >0` at the very first beginning.
         """
-    
+
     @abstractmethod
     def _validate_adapter(self, adapter: BaseAdapter, *args, **kwargs) -> BaseAdapter:
         """
@@ -205,10 +206,12 @@ class BaseAdaptedLayer(nn.Module, ABC):
         Returns:
             BaseAdapter object if the adapter is valid. If not, should raise an error.
         """
-    
+
     # ---Abstract (Optional)---
-    
-    def _merge(self, adapter_names: str | list[str] | None = None, *args, **kwargs) -> Any:
+
+    def _merge(
+        self, adapter_names: str | list[str] | None = None, *args, **kwargs
+    ) -> Any:
         """
         Implement the merging process. Should store merge adapter names in `self._merged_adapter_names`.
         Args:
@@ -218,14 +221,32 @@ class BaseAdaptedLayer(nn.Module, ABC):
         """
         raise NotImplementedError
 
-    def _unmerge(self, adapter_names: str | list[str] | None = None, *args, **kwargs) -> Any:
+    def _unmerge(
+        self, adapter_names: str | list[str] | None = None, *args, **kwargs
+    ) -> Any:
         raise NotImplementedError
 
+    def _validate_after_merge_or_unmerge(self, *args, **kwargs) -> None:
+        """
+        This method will be call after merge or unmerge, intentionally used for checking valid parameters.
+        The default behavior is checking there are no Nan, Inf values in parameters of base_layer. Raise if there is one.
+        Args:
+            *args: Arguments passed by API.
+            **kwargs: Argument passed by API.
+
+        Returns:
+            None
+        """
+        for name, param in self.base_layer.named_parameters():
+            if not torch.isfinite(param).all():
+                raise ValueError(
+                    f"base_layer has non-finite value in parameter `{name}`"
+                )
 
     # ---Public---
 
     def get_adapter(
-        self, adapter_name:str, *, raise_if_not_found: bool = True
+        self, adapter_name: str, *, raise_if_not_found: bool = True
     ) -> BaseAdapter | None:
         """
         Get a BaseAdapter object with specified name.
@@ -257,11 +278,11 @@ class BaseAdaptedLayer(nn.Module, ABC):
              So that you must modify again to capture the update.
         """
         return deepcopy(self._merged_adapter_names)
-    
+
     @property
-    def is_merged(self)->bool:
-        return len(self._merged_adapter_names)>0
-    
+    def is_merged(self) -> bool:
+        return len(self._merged_adapter_names) > 0
+
     # ---Private---
 
     def _add_adapters(
@@ -383,7 +404,7 @@ class BaseAdaptedModelConfig(BaseModel, ABC):
         self, fpname: str, base_layer: nn.Module, *args, **kwargs
     ) -> BaseAdapter | None:
         """
-        This method will construct and dispatch adapter for each layer.
+        This method will construct and dispatch an adapter for each base layer.
         Args:
             fpname: Fully qualified name of the module.
             base_layer: The original torch.nn.Module instance of the model.

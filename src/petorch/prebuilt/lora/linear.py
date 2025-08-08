@@ -113,7 +113,7 @@ class LoraLinearAdaptedLayer(BaseAdaptedLayer):
                 assert isinstance(adapter, LoraLinearAdapter)
                 base_output += adapter.get_delta(batch_input)
 
-        return base_output
+            return base_output
 
     def _validate_adapter(self, adapter: BaseAdapter, *args, **kwargs) -> BaseAdapter:
         if isinstance(adapter, LoraLinearAdapter):
@@ -130,7 +130,6 @@ class LoraLinearAdaptedLayer(BaseAdaptedLayer):
         adapter_names = (
             [adapter_names] if isinstance(adapter_names, str) else list(adapter_names)
         )
-
         for name in adapter_names:
             if name not in self._merged_adapter_names:
                 adapter = self.get_adapter(name)

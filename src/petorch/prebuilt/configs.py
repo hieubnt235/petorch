@@ -52,3 +52,4 @@ class LoraLinearModelConfig(BaseAdaptedModelConfig):
         self, fqname: str, base_layer: nn.Module, *args, **kwargs
     ) -> BaseAdaptedLayer:
         return LoraLinearAdaptedLayer(base_layer,*args,**kwargs)
+
