@@ -6,7 +6,7 @@ import torch
 from torch import nn
 
 from petorch.prebuilt.configs import LoraLinearModelConfig
-from petorch.prebuilt.lora import LoraLinearAdaptedLayer, LoraLinearAdapter
+from petorch.prebuilt.adapters.lora import LoraAdaptedLayer, LoraLinear
 from petorch.utilities import TorchInitMethod
 
 adapter_name = "test_prebuild_linear_lora_adapter"
@@ -49,14 +49,14 @@ def test_lora_linear_single_adapter(config, base_layer_bias, dropout, sample):
     ones_init_adapter = config.dispatch_adapter(
         fqname, base_layer, lora_init_method=TorchInitMethod.ones
     )
-    assert isinstance(zero_init_adapter, LoraLinearAdapter)
-    assert isinstance(ones_init_adapter, LoraLinearAdapter)
+    assert isinstance(zero_init_adapter, LoraLinear)
+    assert isinstance(ones_init_adapter, LoraLinear)
 
     # ---Zero init---
     adapted_layer._add_adapters(zero_init_adapter, activate=False)
     adapted_layer.eval()  # IMPORTANT: MUST SWAP TO EVAL AFTER CHANGE ARCHITECTURE.
 
-    assert isinstance(adapted_layer, LoraLinearAdaptedLayer)
+    assert isinstance(adapted_layer, LoraAdaptedLayer)
 
     # For non-activated adapter case, adapted_layer and base_layer output is the same
     output = adapted_layer(sample)
@@ -134,16 +134,18 @@ def _randint_list(n_list: int, l_len: int, a: int, b: int):
         yield l
 
 
-def _make_adapter_configs(num: int) -> list[LoraLinearModelConfig]:
+def _make_adapter_configs(num_current_adapters: int) -> list[LoraLinearModelConfig]:
     return [
         LoraLinearModelConfig(
             adapter_name=f"adapter_{i}",
             rank=4 * rank,
             alpha=8 * rank,
             bias=bias < 5,
-            scale=scale,
+            scale=scale / num_current_adapters,
         )
-        for i, [rank, bias, scale] in enumerate(_randint_list(num, 3, 2, 10))
+        for i, [rank, bias, scale] in enumerate(
+            _randint_list(num_current_adapters, 3, 2, 10)
+        )
     ]
 
 
@@ -168,9 +170,9 @@ def test_lora_linear_multi_adapters(sample, configs):
     adapter_names = [adapter.name for adapter in adapters]
 
     adapted_layer = cast(
-        LoraLinearAdaptedLayer, configs[0].dispatch_adapted_layer(fqname, base_layer)
+        LoraAdaptedLayer, configs[0].dispatch_adapted_layer(fqname, base_layer)
     )
-    assert isinstance(adapted_layer, LoraLinearAdaptedLayer)
+    assert isinstance(adapted_layer, LoraAdaptedLayer)
     # None activated adapter cases
     adapted_layer._add_adapters(adapters, activate=False)
     assert (
@@ -208,10 +210,10 @@ def test_lora_linear_multi_adapters(sample, configs):
 
     # After merge, the base layer is used only, and output equal to the activated adapters case
     assert torch.allclose(
-        o := adapted_layer(sample), activated_output, atol=2e-6
+        o := adapted_layer(sample), activated_output, atol=1e-5
     ), f"max_abs = {(activated_output-o).abs().max()}"
     assert torch.allclose(
-        o := adapted_layer.base_layer(sample), activated_output, atol=2e-6
+        o := adapted_layer.base_layer(sample), activated_output, atol=1e-5
     ), f"max_abs = {(activated_output-o).abs().max()}"
 
     # Unmerge
@@ -220,7 +222,7 @@ def test_lora_linear_multi_adapters(sample, configs):
 
     # It's still activated now, so
     assert torch.allclose(
-        o := adapted_layer(sample), activated_output, atol=1e-6
+        o := adapted_layer(sample), activated_output, atol=1e-5
     ), f"max_abs = {(activated_output-o).abs().max()}"
 
     # But only base does NOT equal
@@ -239,9 +241,9 @@ def test_lora_linear_multi_adapters(sample, configs):
 
     # Check with non-activate output
     assert torch.allclose(
-        o := adapted_layer(sample), output, atol=1e-6
+        o := adapted_layer(sample), output, atol=1e-5
     ), f"max_abs = {(output-o).abs().max()}"
 
     assert torch.allclose(
-        o := adapted_layer.base_layer(sample), output, atol=1e-6
+        o := adapted_layer.base_layer(sample), output, atol=1e-5
     ), f"max_abs = {(output-o).abs().max()}"

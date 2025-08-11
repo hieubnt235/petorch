@@ -1,9 +1,11 @@
 import types
-from typing import cast
+from abc import ABC, abstractmethod
+from typing import cast, Any
 
 import torch
 from accelerate import init_empty_weights
 from diffusers import ModelMixin
+from pydantic import BaseModel
 from safetensors import safe_open
 from torch import nn
 from torchao import quantize_
@@ -13,23 +15,74 @@ from torchao.dtypes.nf4tensor import linear_nf4
 from torchao.quantization.quant_api import _is_linear
 from tqdm import tqdm
 from transformers.utils.hub import cached_files
-from torchao.quantization.quant_api import ap
+from torchao.quantization.quant_api import Int8WeightOnlyConfig
+
+torch.utils.swap_tensors()
+class BaseQuantizer(ABC):
+
+    @abstractmethod
+    def _quantize(self, fqname: str, layer: nn.Module, *args, **kwargs) -> nn.Module | None:
+        """
+        This method implements the quantization process on the layer. There are two options to implement this method:
+
+            1. Inplace method, the layer is modified directly; THIS METHOD MUST RETURN NONE.
+
+            2. Replace method, the original layer will be replaced by a new layer,
+                this new layer can wrap the original one or not. THIS METHOD MUST RETURN A NEW `nn.Module` INSTANCE.
+        
+        Notes:
+            Two methods exist at the sametime is possible, for example, depend on `fqname` and `layer`, choose one method to apply.
+        
+        Args:
+            fqname:
+            layer:
+
+        Returns:
+            nn.Module instance o None
+
+        """
 
 
-def get_weight_file_path(path_or_repo_id:str, filenames:list[str]|str, subfolder, **kwargs)-> str :
+class BaseModelQuantizationConfig(BaseModel, ABC):
+
+    @abstractmethod
+    def dispatch_quantizer(
+        self, fpname: str, base_layer: nn.Module, *args, **kwargs
+    ) -> BaseQuantizer | None:
+        """
+
+        Args:
+            fpname:
+            base_layer:
+            *args:
+            **kwargs:
+
+        Returns:
+            BaseQuantizer instance if the layer is the candidate for quantizing, else return None
+
+        """
+        pass
+
+
+def get_weight_file_path(
+    path_or_repo_id: str, filenames: list[str] | str, subfolder, **kwargs
+) -> str:
     for wn in weight_names:
-        files = cached_files(path_or_repo_id,filenames,subfolder=subfolder,**kwargs)
+        files = cached_files(path_or_repo_id, filenames, subfolder=subfolder, **kwargs)
         if files:
             return files[0]
         else:
             raise ValueError(f"No files {path_or_repo_id}-{filenames}-{subfolder}")
-        
-def quantize_filter_fn(module: nn.Module,module_name: str)->bool:
+
+
+def quantize_filter_fn(module: nn.Module, module_name: str) -> bool:
     # Make sure the weight is only quantized once
     is_linear = _is_linear(module, module_name)
     passed = is_linear and (not isinstance(module.weight, NF4Tensor))
     if passed:
-        print(f"Quantize module {module.__class__.__name__}, Shape = {module.weight.shape}")
+        print(
+            f"Quantize module {module.__class__.__name__}, Shape = {module.weight.shape}"
+        )
     return passed
 
 
@@ -37,12 +90,12 @@ def quantize(
     model: torch.nn.Module | ModelMixin,
     weight_path: str,
     *,
-    config: AOBaseConfig ,
+    config: AOBaseConfig,
     compute_dtype: torch.dtype = None,
     device: str = "cpu",
 ):
     """
-    
+
     Args:
         model:
         weight_path:
@@ -54,7 +107,7 @@ def quantize(
 
     """
     dtype = compute_dtype or next(model.parameters()).dtype
-    
+
     with safe_open(weight_path, framework="pt", device="cpu") as f:
         f = cast(safe_open, f)
 
@@ -80,39 +133,44 @@ def quantize(
             # print(f"Add params `{model_key}` --- {t.shape}")
             quantize_(module, nf4config, filter_fn=quantize_filter_fn)
 
-if __name__=="__main__":
+
+if __name__ == "__main__":
     from diffusers.utils import SAFETENSORS_WEIGHTS_NAME, WEIGHTS_NAME
     from diffusers import AutoencoderKL, ModelMixin
     from dataclasses import dataclass
     from torchao.quantization import register_quantize_module_handler
-    
+
     model_id = "stabilityai/stable-diffusion-2-1"
 
     weight_names = [SAFETENSORS_WEIGHTS_NAME, WEIGHTS_NAME]
-    
+
     vae_subfolder = "vae"
-    vae_config = AutoencoderKL.load_config(model_id, subfolder=vae_subfolder, # variant='fp16'
+    vae_config = AutoencoderKL.load_config(
+        model_id,
+        subfolder=vae_subfolder,  # variant='fp16'
     )
-    
+
     @dataclass
     class NF4Config(AOBaseConfig):
         block_size: int = 64
         scaler_block_size: int = 256
-    
+
     def linear_module_repr(module: nn.Linear):
         return f"in_features={module.weight.shape[1]}, out_features={module.weight.shape[0]}, weight={module.weight}, dtype={module.weight.dtype}"
-    
+
     # For using with `quantize_` api
     @register_quantize_module_handler(NF4Config)
-    def _nf4_weight_only_transform(module: torch.nn.Module, config: NF4Config, ) -> torch.nn.Module:
+    def _nf4_weight_only_transform(
+        module: torch.nn.Module,
+        config: NF4Config,
+    ) -> torch.nn.Module:
         new_weight = to_nf4(module.weight, config.block_size, config.scaler_block_size)
         module.weight = nn.Parameter(new_weight, requires_grad=False)  # Freeze
         module.extra_repr = types.MethodType(linear_module_repr, module)
         return module
-    
+
     nf4config = NF4Config(block_size=16, scaler_block_size=16)
 
     with init_empty_weights():
         vae = AutoencoderKL.from_config(vae_config)
         vae = cast(AutoencoderKL, vae).to(dtype=torch.bfloat16)
-

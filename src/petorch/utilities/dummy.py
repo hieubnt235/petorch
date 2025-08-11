@@ -6,23 +6,16 @@ class Dummy(nn.Module):
     def __init__(self):
         super().__init__()
         self.input_shape = (8, 8)
-        # self.conv = nn.Conv2d(3, 3, 3, padding="same")
-        # self.norm = nn.Norm
-        # self.flatten = nn.Flatten()
-        # self.fc1 = nn.Linear(8 * 8 * 3, 256)
-        # self.fc2 = nn.Linear(256, 100)
-
-        # Convolutional part
         self.conv = nn.Conv2d(3, 3, 3, padding="same")
-        self.bn = nn.BatchNorm2d(3)  # <-- ADDED
+        self.bn = nn.BatchNorm2d(3)
         self.relu = nn.ReLU()
         self.flatten = nn.Flatten()
 
         # Fully connected part
         self.fc1 = nn.Linear(8 * 8 * 3, 256)
-        self.ln1 = nn.LayerNorm(256)  # <-- ADDED
+        self.ln1 = nn.LayerNorm(256)
         self.fc2 = nn.Linear(256, 100)
-        self.ln2 = nn.LayerNorm(100)  # <-- ADDED
+        self.ln2 = nn.LayerNorm(100)
 
     def forward(self, x: torch.Tensor):
         assert x.shape[2:] == self.input_shape, f"{x.shape[:2]}-{self.input_shape}"
@@ -30,7 +23,7 @@ class Dummy(nn.Module):
         x = self.relu(self.bn(self.conv(x)))
         x = self.flatten(x)
         x = self.relu(self.ln1(self.fc1(x)))
-        x = self.ln2(self.fc2(x)) # No activation on the final output
+        x = self.ln2(self.fc2(x))  # No activation on the final output
         return x
 
 

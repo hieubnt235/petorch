@@ -7,56 +7,6 @@ import torch
 from pydantic import BaseModel, ConfigDict, Field
 from torch import nn
 
-"""
-Problem from peft:
-
-All redundant non-use adapters and layers still exists in repr.
-We should drop that, or some how flag it to disable for easy debug
-
-adapter know which module to inject (through config)
-or
-
-
-Adapter itself SHOULD NOT know about it's activate or scale,..., it the role of layer.
-
-**Inject adapter API**:
-Each layer type know what layer to add adapter (the first is win or raise if duplicate), or Dispatcher API ?
-Adapter know how to use `scale`, and adapter layer set it (user set it).
-
-
-1. We have BaseModule that we want to inject adapter.
-2. After inject adapter,
-
-
-Pytorch model should keepin pytorch model, we provide function that manipulate adapter
-
-"""
-
-"""
-
-Aim:
-1. Need the simple and flexibility.
-2. Create framework (simple to dev) instead of library (easy to use), so that allow user to easy to build their own methods.
-3. Native for every pytorch model, easy to integrate Pytorch base model of other libraries like transformers, diffusers, timm,...
-4. Unify two concepts of quantization and peft to a single place.
-5. Intensity in sanity checking.
-
-Design:
-1. Pytorch model should keepin pytorch model, we provide function that manipulate adapter,
-So that user just use pytorch model be default.
-
-2. One model adapter can be mixing of multiple adapter, for example some layers use LORA, some layers
-use I3A etc?
-
-Usages:
-1. Build AbstractLayerAdapter subclasses
-2. Build Config for dispatcher and all adapter parameters
-3. Define AdaptedLayer.forward method for the usage of multi adapters.
-4. Call AdapterManagerAPI.
-
-
-"""
-
 
 class ValidateConfigKwargs(TypedDict):
     strict: bool | None
@@ -75,9 +25,12 @@ class BaseAdapter(nn.Module):
     The abstract class for one layer adapter.
     For example, it contains loraA and loraB matrices.
 
+    The only requirement of the subclasses of this method is the ` config_class ` class attribute.
+
+
     Features:
-        - Adapter declare dynamic adjustable hyperparameters (dahparams), such as scale, for higher-level set it (use set it).
-        - Adapter know how to use that (dhparams) in forward method.
+        - Adapter declares dynamic adjustable hyperparameters, such as scale, for higher-level set it (use set it).
+        - Adapter knows how to use these hyperparameters in the forward method.
 
     """
 
@@ -123,14 +76,6 @@ class BaseAdapter(nn.Module):
     def name(self) -> str:
         return self._adapter_name
 
-    def merge(self, *args, **kwargs):
-        """This method will merge this adapter to base layer."""
-        raise NotImplementedError
-
-    def unmerge(self):
-        """This method will unmerge this adapter to base layer."""
-        raise NotImplementedError
-
     def __getitem__(self, item):
         return getattr(self.config, item)
 
@@ -162,7 +107,7 @@ class BaseAdapter(nn.Module):
 
 class BaseAdaptedLayer(nn.Module, ABC):
     """
-    This class will wrap original layer with `Adapters`, and then replace the original layer to this.
+    This class will wrap the original layer with `Adapters`, and then replace the original layer to this.
 
     This class must not exist without any adapter. It will be replaced to the base layer when no adapter in it.
 
@@ -321,13 +266,13 @@ class BaseAdaptedLayer(nn.Module, ABC):
                 try:
                     rm_adt = adapters.pop(
                         name
-                    )  # Will raise key error if not found adapter.
+                    )  # Will raise a key error if not found adapter.
                     assert isinstance(
                         rm_adt, BaseAdapter
-                    )  # Check if dict contains only BaseAdapter.
+                    )  # Check if the dict contains only BaseAdapter.
                     assert (
                         name not in removed_adapters
-                    )  # Check if name exists in both dicts.
+                    )  # Check if the name exists in both dicts.
                     removed_adapters.append(name)
                     if name in self._merged_adapter_names:
                         self._merged_adapter_names.remove(name)
@@ -387,16 +332,18 @@ class BaseAdaptedLayer(nn.Module, ABC):
         return activate_adapters
 
 
-class BaseAdaptedModelConfig(BaseModel, ABC):
+class BaseModelAdaptionConfig(BaseModel, ABC):
     """
-    Config that bind with one model adapter.
+    Config that bind with the model to one adapter.
 
     Config has two roles:
-    1. Contain all arguments for adapter layer to use.
+    1. Contain all arguments for the adapter layer to use. So that this config must has all required attributes of all adapter layers it dispatches,
+     which is defined in `BaseAdapter.config_class`
+
     2. Contain dispatch logic for construct LayerAdapter and replace it the base_layer .
     """
 
-    model_config = ConfigDict(validate_assignment=True)
+    model_config = ConfigDict(validate_assignment=True, validate_default=True)
     adapter_name: str = Field("default")
 
     @abstractmethod
@@ -408,8 +355,8 @@ class BaseAdaptedModelConfig(BaseModel, ABC):
         Args:
             fpname: Fully qualified name of the module.
             base_layer: The original torch.nn.Module instance of the model.
-            args: Addition arguments passed by `add_adapter` method.
-            kwargs: Addition keyword arguments passed by `add_adapter` method.
+            args: Addition arguments passed by the ` add_adapter ` method.
+            kwargs: Addition keyword arguments passed by the ` add_adapter ` method.
         Returns:
             BaseAdapter object, or None when does not add adapter to layer.
 
@@ -419,5 +366,20 @@ class BaseAdaptedModelConfig(BaseModel, ABC):
     def dispatch_adapted_layer(
         self, fpname: str, base_layer: nn.Module, *args, **kwargs
     ) -> BaseAdaptedLayer:
-        cast(BaseAdaptedModelConfig, self)  # For disable warning
+        """
+        This method will dispatch a BaseAdaptedLayer instance for the layer that is being added adapter for the first time only.
+        In other words, it will be called by API when:
+            1. The base layer is the candidate to add an adapter (`dispatch_adapter` return `BaseAdapter` instance)
+            2. The base layer is not yet AdaptedLayer instance.
+
+        Args:
+            fpname:
+            base_layer:
+            *args:
+            **kwargs:
+
+        Returns:
+
+        """
+        cast(BaseModelAdaptionConfig, self)  # For disable warning
         return BaseAdaptedLayer(base_layer)

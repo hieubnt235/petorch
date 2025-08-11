@@ -5,20 +5,22 @@ import torch
 from pydantic import BaseModel
 from torch import nn
 
-from .base import (
+from .core import (
     BaseAdapter,
-    BaseAdaptedModelConfig,
+    BaseModelAdaptionConfig,
     BaseAdaptedLayer,
     ValidateConfigKwargs,
 )
 
-__ADT_NAMES_ATTR__ = "__PETORCH_ADAPTER_NAMES_ATTRIBUTE_NAME__"
+__ADT_API_ATTR__ = "__PETORCH_ADAPTER_NAMES_ATTRIBUTE_NAME__"
+"""This is private attributes that will be injected to the original model to keep tracks of metadata."""
 
 
 class AdapterAPI:
+    
     class __AdapterNameList__:
         """
-        This class will be injected to model to record adapter names.
+        This class will be injected to the model to record adapter names.
         """
 
         def __init__(self):
@@ -43,7 +45,7 @@ class AdapterAPI:
             list of adapter names with len always >0 or None if no adapter is added (Model is now the raw, original model.).
 
         """
-        adt_names = getattr(model, __ADT_NAMES_ATTR__, None)
+        adt_names = getattr(model, __ADT_API_ATTR__, None)
         if adt_names is not None:
             assert isinstance(adt_names, AdapterAPI.__AdapterNameList__)
             assert (
@@ -55,7 +57,7 @@ class AdapterAPI:
     @staticmethod
     @torch.no_grad()
     def add_adapter(
-        model: nn.Module, config: BaseAdaptedModelConfig, *args, **kwargs
+        model: nn.Module, config: BaseModelAdaptionConfig, *args, **kwargs
     ) -> list[str]:
         """
         Add adapter to Pytorch model.
@@ -145,16 +147,16 @@ class AdapterAPI:
 
             # If a new AdaptedLayer created, swap the base layer with it.
             if not is_adapted_layer:
-                model.set_submodule(fqname, adapted_layer)
+                model.set_submodule(fqname, adapted_layer, strict=True)
 
         # Update model.__ADT_NAMES_ATTR__, create new if not exists.
         if len(adapted_fqnames) > 0:
-            if not hasattr(model, __ADT_NAMES_ATTR__):
+            if not hasattr(model, __ADT_API_ATTR__):
                 adt_name_list = AdapterAPI.__AdapterNameList__()
                 adt_name_list.append(config.adapter_name)
-                setattr(model, __ADT_NAMES_ATTR__, adt_name_list)
+                setattr(model, __ADT_API_ATTR__, adt_name_list)
             else:
-                getattr(model, __ADT_NAMES_ATTR__).append(config.adapter_name)
+                getattr(model, __ADT_API_ATTR__).append(config.adapter_name)
 
         model.train(model.training)
         return adapted_fqnames
@@ -313,7 +315,7 @@ class AdapterAPI:
             if len(rm_adt) > 0:
                 # If there's no adapter in module after removing, switch it to base layer.
                 if len(layer.adapter_names) == 0:
-                    model.set_submodule(fqname, layer.base_layer)
+                    model.set_submodule(fqname, layer.base_layer, strict=True)
             else:
                 # If rm_adt ==[], Then adapted layer must have adapters.
                 # Because when after removing and no adapters remain, it already switched to baselayer, no more adapted layer.
@@ -323,12 +325,12 @@ class AdapterAPI:
         assert len(not_found_adapter_names) == 0
 
         _adapter_name_list = cast(
-            AdapterAPI.__AdapterNameList__, getattr(model, __ADT_NAMES_ATTR__)
+            AdapterAPI.__AdapterNameList__, getattr(model, __ADT_API_ATTR__)
         )
         for adt_name in adapter_names:
             _adapter_name_list.remove(adt_name)
         if len(_adapter_name_list._private_list) == 0:
-            delattr(model, __ADT_NAMES_ATTR__)
+            delattr(model, __ADT_API_ATTR__)
 
         model.train(model.training)
 
@@ -376,7 +378,7 @@ class AdapterAPI:
             else:
                 layer._unmerge(adapter_names, *args, **kwargs)
 
-            layer._validate_after_merge_or_unmerge(*args,**kwargs)
+            layer._validate_after_merge_or_unmerge(*args, **kwargs)
         model.train(model.training)
 
     @staticmethod

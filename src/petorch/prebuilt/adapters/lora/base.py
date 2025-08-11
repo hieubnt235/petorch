@@ -1,8 +1,8 @@
-from typing import Unpack, cast
+from abc import ABC, abstractmethod
+from typing import Unpack, cast, Type
 
 import torch
-from mlflow.types.chat import BaseModel
-from pydantic import PositiveInt, NonNegativeFloat
+from pydantic import PositiveInt, NonNegativeFloat, BaseModel, PositiveFloat
 from torch import nn
 
 from petorch.adapter import (
@@ -13,42 +13,81 @@ from petorch.adapter import (
 )
 
 
-# from peft.tuners.lora import Linear, LoraModel
-# from peft import PeftModel
-
-
-class LoraLinearAdapterConfig(AdapterConfig):
+class LoraAdapterConfig(AdapterConfig):
     rank: PositiveInt = 8
-    alpha: PositiveInt = 16
+    alpha: PositiveFloat = 16
     dropout: NonNegativeFloat = 0.1
     bias: bool = False
+    scale: PositiveFloat = 1.0
 
 
-class LoraLinearAdapter(BaseAdapter):
+class BaseLoraAdapter(BaseAdapter, ABC):
 
-    config_class = LoraLinearAdapterConfig
+    config_class = LoraAdapterConfig
+    base_layer_class: Type[nn.Module]
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        assert issubclass(
+            cls.base_layer_class, nn.Module
+        ), f"`base_layer_class` must be the subclass of `torch.nn.Module`. Got `{cls.base_layer_class}`."
 
     def __init__(
         self,
-        base_layer: nn.Linear,
+        base_layer: nn.Module,
         config: dict | BaseModel,
         **kwargs: Unpack[ValidateConfigKwargs],
     ):
         assert isinstance(
-            base_layer, nn.Linear
-        ), f"Base layer must has type {nn.Linear}, got {type(base_layer)}."
+            base_layer, self.base_layer_class
+        ), f"Base layer must has type {self.base_layer_class}, got {type(base_layer)}."
+
         super().__init__(base_layer, config, **kwargs)
 
-        self.scale = getattr(self.config, "scale", None) or 1
-
-        # Modules
-        self.lora_A = nn.Linear(base_layer.in_features, self.rank, bias=False)
-        """lora_A.weight has shape (rank, base_layer.in_features)"""
-        self.lora_B = nn.Linear(self.rank, base_layer.out_features, bias=self.is_bias)
-        """lora_B.weight has shape (base_layer.out_features, rank)"""
         self.lora_dropout = (
             nn.Dropout(self.dropout) if self.dropout > 0.0 else nn.Identity()
         )
+
+        self.lora_A: nn.Module | None = None
+        self.lora_B: nn.Module | None = None
+        self._init_lora_layers()
+        if not (
+            isinstance(self.lora_A, nn.Module) and isinstance(self.lora_B, nn.Module)
+        ):
+            raise ValueError(
+                f"The derived method `_init_lora_layers` must be init the `lora_A` and `lora_B` attributes to `torch.nn.Module`."
+                f"Got `{self.lora_A}` and `{self.lora_B}`."
+            )
+        if (b := getattr(self.lora_A, "bias", None)) is not None:
+            raise ValueError(f"Not allow bias in `lora_A`. Got bias=`{b}`.")
+
+    # ---Abstract methods---
+
+    @abstractmethod
+    def _init_lora_layers(self) -> None:
+        """Override this method to change `self.lora_A` and `self.lora_B`"""
+
+    def get_delta(self, batch_input: torch.Tensor) -> torch.tensor:
+        return self.lora_B(self.lora_A(self.lora_dropout(batch_input))) * self.scaling
+
+    @abstractmethod
+    def get_delta_weight(self) -> torch.Tensor:
+        """
+        Get lora delta weight, Note that this is weight only, the merging process need also bias.
+        Returns:
+            Tensor with shape (base_layer.out_features, base_layer.in_features)
+        """
+        pass
+
+    @abstractmethod
+    def get_delta_bias(self) -> torch.Tensor | None:
+        pass
+
+    # ---Properties---
+
+    @property
+    def config(self) -> LoraAdapterConfig:
+        return cast(LoraAdapterConfig, super().config)
 
     @property
     def is_bias(self) -> bool:
@@ -67,29 +106,15 @@ class LoraLinearAdapter(BaseAdapter):
         return self.config.dropout
 
     @property
+    def scale(self) -> float:
+        return self.config.scale
+
+    @property
     def scaling(self) -> float:
         return self.scale * self.alpha / self.rank
 
-    def get_delta(self, batch_input: torch.Tensor) -> torch.tensor:
-        return self.lora_B(self.lora_A(self.lora_dropout(batch_input))) * self.scaling
 
-    def get_delta_weight(self) -> torch.Tensor:
-        """
-        Get lora delta weight, Note that this is weight only, the merging process need also bias.
-        Returns:
-            Tensor with shape (base_layer.out_features, base_layer.in_features)
-        """
-        delta_weight = (self.lora_B.weight @ self.lora_A.weight) * self.scaling
-        assert delta_weight.shape == self.base_layer.weight.shape
-        return delta_weight
-
-    def get_delta_bias(self) -> torch.Tensor | None:
-        if self.is_bias:
-            return self.lora_B.bias * self.scaling
-        return None
-
-
-class LoraLinearAdaptedLayer(BaseAdaptedLayer):
+class LoraAdaptedLayer(BaseAdaptedLayer):
 
     def forward(self, batch_input: torch.Tensor, *args, **kwargs) -> torch.Tensor:
         """
@@ -110,13 +135,15 @@ class LoraLinearAdaptedLayer(BaseAdaptedLayer):
             return base_output
         else:
             for adapter in self.active_adapters.values():
-                assert isinstance(adapter, LoraLinearAdapter)
+                assert isinstance(adapter, BaseLoraAdapter)
                 base_output += adapter.get_delta(batch_input)
 
             return base_output
 
     def _validate_adapter(self, adapter: BaseAdapter, *args, **kwargs) -> BaseAdapter:
-        if isinstance(adapter, LoraLinearAdapter):
+        if isinstance(adapter, BaseLoraAdapter) and (
+            adapter.base_layer == self.base_layer
+        ):
             return adapter
         else:
             raise ValueError(
@@ -133,7 +160,7 @@ class LoraLinearAdaptedLayer(BaseAdaptedLayer):
         for name in adapter_names:
             if name not in self._merged_adapter_names:
                 adapter = self.get_adapter(name)
-                assert isinstance(adapter, LoraLinearAdapter)
+                assert isinstance(adapter, BaseLoraAdapter)
                 assert self.base_layer == adapter.base_layer
 
                 base_layer = cast(nn.Linear, self.base_layer)
@@ -157,7 +184,7 @@ class LoraLinearAdaptedLayer(BaseAdaptedLayer):
 
         for name in adapter_names:
             adapter = self.get_adapter(name)
-            assert isinstance(adapter, LoraLinearAdapter)
+            assert isinstance(adapter, BaseLoraAdapter)
 
             base_layer = cast(nn.Linear, self.base_layer)
             base_layer.weight -= adapter.get_delta_weight()

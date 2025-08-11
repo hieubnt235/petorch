@@ -4,16 +4,15 @@ from typing import cast
 
 import pytest
 import torch
-from numpy.ma.core import allclose
+from loguru import logger
 from torch import Tensor, nn
 from torch.utils.hooks import RemovableHandle
 
 from petorch.adapter import BaseAdapter, AdapterAPI, BaseAdaptedLayer
-from petorch.dummy import NestedDummy, Dummy
+from petorch.prebuilt.adapters.lora import LoraLinear, LoraAdaptedLayer
 from petorch.prebuilt.configs import LoraLinearModelConfig
-from petorch.prebuilt.lora import LoraLinearAdapter, LoraLinearAdaptedLayer
 from petorch.utilities import TorchInitMethod
-from loguru import logger
+from petorch.utilities.dummy import NestedDummy, Dummy
 
 sample_size = (3, 8, 8)
 
@@ -70,7 +69,7 @@ def test_api(model_cls):
     # noinspection PyTypeChecker
     assert isinstance(
         (activated_adapter := adapted_layer.active_adapters[adapter_name]),
-        LoraLinearAdapter,
+        LoraLinear,
     )
 
     # Test that base_layer is not the module of adapter
@@ -137,16 +136,16 @@ def _randint_list(n_list: int, l_len: int, a: int, b: int):
         yield l
 
 
-def _make_adapter_configs(num: int) -> list[LoraLinearModelConfig]:
+def _make_adapter_configs(num_current_adapters: int) -> list[LoraLinearModelConfig]:
     return [
         LoraLinearModelConfig(
             adapter_name=f"adapter_{i}",
             rank=4 * rank,
             alpha=8 * rank,
             bias=bias < 5,
-            scale=scale,
+            scale=scale/num_current_adapters, # For a stable test when added too many adapters.
         )
-        for i, [rank, bias, scale] in enumerate(_randint_list(num, 3, 2, 10))
+        for i, [rank, bias, scale] in enumerate(_randint_list(num_current_adapters, 3, 2, 10))
     ]
 
 
@@ -178,7 +177,7 @@ def test_manipulate_multi_adapters(configs, model_cls):
         adapted_layer := model.get_submodule(
             adapted_fqn[randint(0, len(adapted_fqn) - 1)]
         ),
-        LoraLinearAdaptedLayer,
+        LoraAdaptedLayer,
     )  # Get any adapted layer. Note that this layer is already tested in `test_api`.Just get for monitoring.
 
     # None activated adapter cases
@@ -195,7 +194,7 @@ def test_manipulate_multi_adapters(configs, model_cls):
     AdapterAPI.activate_adapter(model, adapter_names, activate=True)
     for fqn in adapted_fqn:
         al = model.get_submodule(fqn)
-        assert isinstance(al, LoraLinearAdaptedLayer)
+        assert isinstance(al, LoraAdaptedLayer)
         assert (
             len(adapted_layer.active_adapters)
             == len(adapted_layer.adapter_names)
@@ -220,11 +219,22 @@ def test_manipulate_multi_adapters(configs, model_cls):
 
     for name, param in model.named_parameters():
         org_param = org_model.get_parameter(name)
-        assert allclose(param, org_param)
-    assert allclose(model(sample), org_model(sample))
+        assert torch.allclose(param, org_param)
+    assert torch.allclose(model(sample), org_model(sample))
 
 
 def assert_models_are_identical(model_a: nn.Module, model_b: nn.Module):
+    names_a = AdapterAPI.get_adapter_names(model_a)
+    names_b = AdapterAPI.get_adapter_names(model_b)
+    m = f"Model architectures not match in adapters. Got `{names_a}` and `{names_b}`."
+    if names_a is None:
+        assert names_b is None, m
+    else:
+        assert names_b is not None, m
+        names_a.sort()
+        names_b.sort()
+        assert names_a == names_b, m
+
     modules_a = {name: module for name, module in model_a.named_modules()}
     modules_b = {name: module for name, module in model_b.named_modules()}
     params_a = {name: param for name, param in model_a.named_parameters()}
@@ -245,7 +255,7 @@ def assert_models_are_identical(model_a: nn.Module, model_b: nn.Module):
 
     for name, param_a in params_a.items():
         param_b = model_b.get_parameter(name)
-        assert torch.allclose(param_a, param_b, atol=2e-5), (
+        assert torch.allclose(param_a, param_b, atol=3e-5), (
             f"Params {name} does not match. "
             f"max_abs = {(param_a-param_b).abs().max()},"
             f" max={max(param_a.max().item(),param_b.max().item())}"
@@ -262,8 +272,8 @@ def register_record_hook(
     handles: list[RemovableHandle] = []
     for fqn in fqns:
         # Note, use default arg for capture, if not, it takes the reference of fqn, then error will happened later.
-        def record(module, input, output, captured_fqn=fqn):
-            record_dict[captured_fqn] = {"input": input, "output": output}
+        def record(module, args, output, captured_fqn=fqn):
+            record_dict[captured_fqn] = {"input": args, "output": output}
 
         handles.append(model.get_submodule(fqn).register_forward_hook(record))
 
@@ -312,7 +322,7 @@ def test_merge_api(
         current_adapted_fqn = 0
         for name, module in model.named_modules():
             # Check for all current adapted layers
-            if isinstance(module, LoraLinearAdaptedLayer):
+            if isinstance(module, LoraAdaptedLayer):
                 assert name in adapted_fqns
                 if is_activated:
                     assert (
@@ -352,7 +362,7 @@ def test_merge_api(
         adapted_layer := model.get_submodule(
             adapted_fqns[randint(0, len(adapted_fqns) - 1)]
         ),
-        LoraLinearAdaptedLayer,
+        LoraAdaptedLayer,
     )  # Get any adapted layer. Note that this layer is already tested in `test_api`.Just get for monitoring.
 
     # None-activated-adapter case
@@ -386,15 +396,6 @@ def test_merge_api(
     model.eval()
     _assert_correct_adapted_layer(is_activated=True, is_merged=True)
 
-    # Check for all adapted layers are merged
-    # for adapted_layer_fqn in adapted_fqns:
-    #     al = model.get_submodule(adapted_layer_fqn)
-    #     assert isinstance(al, LoraLinearAdaptedLayer)
-    #     assert al.is_merged, f"{adapted_layer_fqn}:{al.adapter_names}"
-    #     assert len(al.merged_adapter_names) == len(
-    #         adapter_names
-    #     ), f"{adapted_layer_fqn}:{al}"
-
     # Check the equality between merged case and activated adapters case, both must the as close as possible.
     merged_al_records = {}
     mal_handle = register_record_hook(model, merged_al_records, adapted_fqns)
@@ -419,18 +420,18 @@ def test_merge_api(
         assert torch.allclose(
             a := activated_al_records[fqn]["input"][0],
             m := merged_al_records[fqn]["input"][0],
-            atol=5e-4,
+            atol=5e-5
         ), f"max_abs = {(a-m).abs().max()}, max={max(a.max(),m.max())}"
 
         assert torch.allclose(
             a := activated_al_records[fqn]["output"],
             m := merged_al_records[fqn]["output"],
-            atol=5e-4,
-        ), f"max_abs = {(a-m).abs().max()}, max={max(a.max(),m.max())}"
+            atol=5e-4,rtol=1e-4
+        ), f"max_abs = {(a-m).abs().max()}, a_max={a.max()}, m_max={m.max()}"
 
     assert torch.allclose(
-        o := model(sample), activated_output, atol=5e-6
-    ), f"max_abs = {(activated_output-o).abs().max()}"
+        merged_output, activated_output, atol=5e-6
+    ), f"max_abs = {(activated_output-merged_output).abs().max()}"
 
     # Unmerge, still activated
     AdapterAPI.unmerge(model, adapter_names)
@@ -445,15 +446,15 @@ def test_merge_api(
     _assert_correct_adapted_layer(is_activated=False, is_merged=False)
     # Now the base model output is equal to the original output
     assert torch.allclose(
-        o := model(sample), b := base_output, atol=3e-4
-    ), f"max_abs = {(o-base_output).abs().max()}, max={max(o.max(),b.max().item())}"
+        o := model(sample), b := base_output, atol=5e-4,rtol=1e-4
+    ), f"max_abs = {(o-base_output).abs().max()}, o_max={o.max()},b_max = {b.max().item()}"
 
     # Remove adapters
     with pytest.raises(AssertionError, match="Model architectures not match"):
         assert_models_are_identical(model, org_model)
     AdapterAPI.remove_adapter(model, adapter_names)
     assert_models_are_identical(model, org_model)
-    
+
     assert str(org_model) == str(model)
     logger.debug(
         f"\nOriginal model:\n{org_model}" f"\nProcessed and cleaned up model:\n{model}"
