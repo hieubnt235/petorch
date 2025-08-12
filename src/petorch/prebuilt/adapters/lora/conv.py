@@ -14,13 +14,6 @@ class LoraConvNd(BaseLoraAdapter):
     def base_layer(self) -> _ConvNd:
         return cast(_ConvNd, super().base_layer)
 
-    @classmethod
-    def _init_subclass_(cls, **kwargs):
-        assert (
-            issubclass(cls.base_layer_class, _ConvNd)
-            and cls.base_layer_class != _ConvNd
-        ), f"`base_layer_class` must be the subclass of `{_ConvNd}`(not be it also). Got `{cls.base_layer_class}`."
-
     @property
     def kernel_dim(self) -> int:
         return self.base_layer.weight.dim()

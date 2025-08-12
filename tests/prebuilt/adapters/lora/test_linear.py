@@ -102,7 +102,6 @@ def test_lora_linear_single_adapter(config, base_layer_bias, dropout, sample):
     assert len(adapted_layer.non_active_adapters) == 1
 
     # Check merged-unactivated case == unmerged-activated case
-    # Notes: Sometime error because of out `xtol`(approx 5e-5)
     assert torch.allclose(
         o := adapted_layer(sample), activated_adapter_output, atol=5e-5
     ), f"max_abs = {(activated_adapter_output-o).abs().max()}"

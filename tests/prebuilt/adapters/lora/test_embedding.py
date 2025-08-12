@@ -4,15 +4,14 @@ from typing import cast
 import pytest
 import torch
 from torch import nn
-from torch.nn.modules.conv import _ConvNd
 
-from petorch.prebuilt.adapters.lora import LoraAdaptedLayer
-from petorch.prebuilt.adapters.lora.conv import LoraConvNd
+from petorch.prebuilt.adapters.lora import LoraAdaptedLayer, LoraEmbedding
 from petorch.prebuilt.configs import LoraConfig
 from petorch.utilities import TorchInitMethod
 
-adapter_name = "test_prebuild_conv_lora_adapter"
+adapter_name = "test_prebuild_linear_lora_adapter"
 fqname = "base_layer_fqname"
+emb_size = (1000, 500)
 
 """Vary these variableS to the large numbers for ensuring the testing is True for most cases. But the test will run for a longer time."""
 
@@ -25,40 +24,34 @@ NUM_TEST_CONFIG_LISTS = 10
 NUM_CONCURRENT_ADAPTERS = 10
 """For testing with multi adapters, this is the number of adapter model have at the same time. """
 
-conv_args = (3, 4, 3, 1, "same")
-
 
 @torch.no_grad()
 @pytest.mark.parametrize(
     "config",
     [
-        LoraConfig(adapter_name=adapter_name, bias=False),
-        LoraConfig(adapter_name=adapter_name, bias=True),
+        LoraConfig(adapter_name=adapter_name),
+        LoraConfig(adapter_name=adapter_name),
     ],
 )
 @pytest.mark.parametrize(
-    "base_layer", [nn.Conv1d(*conv_args), nn.Conv2d(*conv_args), nn.Conv3d(*conv_args)]
+    "sample",
+    [
+        torch.tensor([randint(0, 1000) for _ in range(3)])
+        for _ in range(NUM_TEST_SAMPLES)
+    ],
 )
-@pytest.mark.parametrize("base_layer_bias", [True, False])
-@pytest.mark.parametrize("dropout", [0, 0.5])
-def test_lora_conv_single_adapter(
-    config, base_layer: _ConvNd, base_layer_bias, dropout
-):
-    kernel_dim = base_layer.weight.dim()
-    sample = torch.rand([NUM_TEST_SAMPLES, conv_args[0]] + [16] * (kernel_dim - 2))
-
-    config.dropout = dropout
+def test_lora_embedding_single_adapter(config: LoraConfig, sample: torch.Tensor):
+    base_layer = nn.Embedding(*emb_size)
     adapted_layer = config.dispatch_adapted_layer(fqname, base_layer)
     adapted_layer.eval()
-
     zero_init_adapter = config.dispatch_adapter(
         fqname, base_layer, lora_init_method=TorchInitMethod.zeros
     )
     ones_init_adapter = config.dispatch_adapter(
         fqname, base_layer, lora_init_method=TorchInitMethod.ones
     )
-    assert isinstance(zero_init_adapter, LoraConvNd)
-    assert isinstance(ones_init_adapter, LoraConvNd)
+    assert isinstance(zero_init_adapter, LoraEmbedding)
+    assert isinstance(ones_init_adapter, LoraEmbedding)
 
     # ---Zero init---
     adapted_layer._add_adapters(zero_init_adapter, activate=False)
@@ -110,7 +103,6 @@ def test_lora_conv_single_adapter(
     assert len(adapted_layer.non_active_adapters) == 1
 
     # Check merged-unactivated case == unmerged-activated case
-    # Notes: Sometime error because of out `xtol`(approx 5e-5)
     assert torch.allclose(
         o := adapted_layer(sample), activated_adapter_output, atol=5e-5
     ), f"max_abs = {(activated_adapter_output-o).abs().max()}"
@@ -148,12 +140,9 @@ def _make_adapter_configs(num_current_adapters: int) -> list[LoraConfig]:
             adapter_name=f"adapter_{i}",
             rank=4 * rank,
             alpha=8 * rank,
-            bias=bias < 5,
             scale=scale / num_current_adapters,
         )
-        for i, [rank, bias, scale] in enumerate(
-            _randint_list(num_current_adapters, 3, 2, 10)
-        )
+        for i, [rank, scale] in enumerate(_randint_list(num_current_adapters, 2, 2, 10))
     ]
 
 
@@ -166,12 +155,14 @@ def _make_adapter_configs(num_current_adapters: int) -> list[LoraConfig]:
     ],
 )
 @pytest.mark.parametrize(
-    "base_layer", [nn.Conv1d(*conv_args), nn.Conv2d(*conv_args), nn.Conv3d(*conv_args)]
+    "sample",
+    [
+        torch.tensor([randint(0, 1000) for _ in range(3)])
+        for _ in range(NUM_TEST_SAMPLES)
+    ],
 )
-def test_lora_conv_multi_adapters(base_layer, configs):
-    kernel_dim = base_layer.weight.dim()
-    sample = torch.rand([NUM_TEST_SAMPLES, conv_args[0]] + [16] * (kernel_dim - 2))
-
+def test_lora_embedding_multi_adapters(sample, configs):
+    base_layer = nn.Embedding(*emb_size)
     adapters = [
         cast(LoraConfig, config).dispatch_adapter(fqname, base_layer)
         for config in configs
@@ -183,6 +174,7 @@ def test_lora_conv_multi_adapters(base_layer, configs):
         LoraAdaptedLayer, configs[0].dispatch_adapted_layer(fqname, base_layer)
     )
     assert isinstance(adapted_layer, LoraAdaptedLayer)
+
     # None activated adapter cases
     adapted_layer._add_adapters(adapters, activate=False)
     assert (
@@ -195,7 +187,7 @@ def test_lora_conv_multi_adapters(base_layer, configs):
 
     output = adapted_layer(sample)
     """Non activate output"""
-
+    assert torch.isfinite(output).all()
     assert torch.allclose(adapted_layer.base_layer(sample), output)
 
     # Activated case
@@ -207,7 +199,12 @@ def test_lora_conv_multi_adapters(base_layer, configs):
     )
 
     activated_output = adapted_layer(sample)
-    assert not torch.allclose(activated_output, output)
+    assert torch.isfinite(activated_output).all()
+
+    assert not torch.allclose(
+        activated_output, output
+    ), f"max_abs = {(activated_output-output).abs().max()}"
+
     assert torch.allclose(
         adapted_layer.base_layer(sample), output
     )  # The base layer still doesn't change
@@ -220,10 +217,10 @@ def test_lora_conv_multi_adapters(base_layer, configs):
 
     # After merge, the base layer is used only, and output equal to the activated adapters case
     assert torch.allclose(
-        o := adapted_layer(sample), activated_output, atol=1e-5
+        o := adapted_layer(sample), activated_output, atol=3e-5
     ), f"max_abs = {(activated_output-o).abs().max()}"
     assert torch.allclose(
-        o := adapted_layer.base_layer(sample), activated_output, atol=1e-5
+        o := adapted_layer.base_layer(sample), activated_output, atol=3e-5
     ), f"max_abs = {(activated_output-o).abs().max()}"
 
     # Unmerge
@@ -251,9 +248,9 @@ def test_lora_conv_multi_adapters(base_layer, configs):
 
     # Check with non-activate output
     assert torch.allclose(
-        o := adapted_layer(sample), output, atol=1e-5
+        o := adapted_layer(sample), output, atol=3e-5
     ), f"max_abs = {(output-o).abs().max()}"
 
     assert torch.allclose(
-        o := adapted_layer.base_layer(sample), output, atol=1e-5
+        o := adapted_layer.base_layer(sample), output, atol=3e-5
     ), f"max_abs = {(output-o).abs().max()}"

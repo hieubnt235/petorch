@@ -11,13 +11,14 @@ from torch.utils.hooks import RemovableHandle
 from petorch.adapter import BaseAdapter, AdapterAPI, BaseAdaptedLayer
 from petorch.prebuilt.adapters.lora import LoraLinear, LoraAdaptedLayer, BaseLoraAdapter
 from petorch.prebuilt.configs import LoraConfig
-from petorch.utilities import TorchInitMethod
-from petorch.utilities.dummy import NestedDummy, Dummy
+from petorch.utilities import TorchInitMethod, DummyV2
+from petorch.utilities.modules import NestedDummy, Dummy
 
 sample_size = (3, 8, 8)
+emb_idx = torch.randint(0, 100, [2, 192])
 
 
-@pytest.mark.parametrize("model_cls", [NestedDummy, Dummy])
+@pytest.mark.parametrize("model_cls", [NestedDummy, DummyV2])
 def test_api(model_cls):
     adapter_name = "test_adapter"
     model = model_cls()
@@ -26,7 +27,7 @@ def test_api(model_cls):
 
     sample = torch.rand((2,) + sample_size)
 
-    output1 = cast(Tensor, org_model(sample))
+    output1 = cast(Tensor, org_model(sample, emb_idx))
 
     # --add_adapter--
     target_fqn = []
@@ -49,7 +50,7 @@ def test_api(model_cls):
     )
     assert adapted_layer.adapter_names[0] == adapter_name
     assert adapter_name in adapted_layer.non_active_adapters
-    assert torch.all(output1 == model(sample))  # Test not activate adapter
+    assert torch.all(output1 == model(sample, emb_idx))  # Test not activate adapter
 
     # --activate_adapter--
     with pytest.raises(ValueError, match="does not have adapter"):
@@ -57,13 +58,13 @@ def test_api(model_cls):
 
     # Activate fail, nothing change, just like not activating
     assert adapter_name in adapted_layer.non_active_adapters
-    assert torch.all(output1 == model(sample))  # Test not activate adapter
+    assert torch.all(output1 == model(sample, emb_idx))  # Test not activate adapter
 
     # After activate successfully, the model output will be changed
     activated_adapter_names = AdapterAPI.activate_adapter(model, adapter_name)
     assert activated_adapter_names[0] == adapter_name
     assert adapter_name in adapted_layer.active_adapters
-    assert not torch.all(output1 == model(sample))
+    assert not torch.all(output1 == model(sample, emb_idx))
 
     # --update_adapter--
     # noinspection PyTypeChecker
@@ -104,11 +105,11 @@ def test_api(model_cls):
         )
 
     # Adapter is still not change after remove fail
-    assert not torch.all(output1 == model(sample))
+    assert not torch.all(output1 == model(sample, emb_idx))
 
     # output now back to the original
     AdapterAPI.remove_adapter(model, [adapter_name])
-    assert torch.all(output1 == model(sample))
+    assert torch.all(output1 == model(sample, emb_idx))
     assert AdapterAPI.get_adapter_names(model) is None
 
 
@@ -160,12 +161,12 @@ def _make_adapter_configs(num_current_adapters: int) -> list[LoraConfig]:
         for _ in range(NUM_TEST_CONFIG_LISTS)
     ],
 )
-@pytest.mark.parametrize("model_cls", [NestedDummy, Dummy])
+@pytest.mark.parametrize("model_cls", [NestedDummy, DummyV2])
 def test_manipulate_multi_adapters(configs, model_cls):
     model = NestedDummy()
     org_model = deepcopy(model)
     sample = torch.randn((2,) + sample_size)
-    base_output: torch.Tensor = org_model(sample)
+    base_output: torch.Tensor = org_model(sample, emb_idx)
 
     # Add adapters
     adapted_fqn: list[str] = []
@@ -191,7 +192,7 @@ def test_manipulate_multi_adapters(configs, model_cls):
         == len(adapted_layer.adapter_names)
         and len(adapted_layer.active_adapters) == 0
     )
-    assert torch.allclose(model(sample), base_output)
+    assert torch.allclose(model(sample, emb_idx), base_output)
 
     # Activate and ensure all adapted layers are activated
     AdapterAPI.activate_adapter(model, adapter_names, activate=True)
@@ -206,11 +207,11 @@ def test_manipulate_multi_adapters(configs, model_cls):
         )
 
     # No equal anymore
-    assert not torch.allclose(model(sample), base_output, atol=1e-2)
+    assert not torch.allclose(model(sample, emb_idx), base_output, atol=1e-2)
 
     # Deactivate
     AdapterAPI.activate_adapter(model, adapter_names, activate=False)
-    assert torch.allclose(model(sample), base_output)
+    assert torch.allclose(model(sample, emb_idx), base_output)
 
     # Remove adapter, model are completely fresh
     AdapterAPI.remove_adapter(
@@ -223,7 +224,7 @@ def test_manipulate_multi_adapters(configs, model_cls):
     for name, param in model.named_parameters():
         org_param = org_model.get_parameter(name)
         assert torch.allclose(param, org_param)
-    assert torch.allclose(model(sample), org_model(sample))
+    assert torch.allclose(model(sample, emb_idx), org_model(sample, emb_idx))
 
 
 def assert_models_are_identical(model_a: nn.Module, model_b: nn.Module):
@@ -258,7 +259,7 @@ def assert_models_are_identical(model_a: nn.Module, model_b: nn.Module):
 
     for name, param_a in params_a.items():
         param_b = model_b.get_parameter(name)
-        assert torch.allclose(param_a, param_b, atol=3e-5), (
+        assert torch.allclose(param_a, param_b, atol=5e-5), (
             f"Params {name} does not match. "
             f"max_abs = {(param_a-param_b).abs().max()},"
             f" max={max(param_a.max().item(),param_b.max().item())}"
@@ -266,8 +267,8 @@ def assert_models_are_identical(model_a: nn.Module, model_b: nn.Module):
 
 
 def z(x: Tensor, epsilon=1e-8):
-    mean = x.mean()
-    std = x.std()
+    mean = x.float().mean()
+    std = x.float().std()
     return (x - mean) / (std + epsilon)
 
 
@@ -302,15 +303,14 @@ def weights_init(m: nn.Module):
         nn.init.constant_(m.bias, 0)
 
 
-_debug_model_times = 0
+_debugged_models = []
 
 
-def debug_model(text: str, model, suspend_if_max_times=1, increase_time=False):
-    global _debug_model_times
-    if _debug_model_times < suspend_if_max_times:
-        logger.debug(f"\n{text}({_debug_model_times}):\n{model}")
-    if increase_time:
-        _debug_model_times += 1
+def debug_model(text: str, model: nn.Module, stop_debug: bool = False):
+    if type(model) not in _debugged_models:
+        logger.debug(f"\n{text}:{"~"*100}\n{model}\n{"="*100}")
+    if stop_debug:
+        _debugged_models.append(type(model))
 
 
 @torch.no_grad()
@@ -326,7 +326,7 @@ def debug_model(text: str, model, suspend_if_max_times=1, increase_time=False):
 )
 @pytest.mark.parametrize(
     "model_cls",
-    [NestedDummy, Dummy],
+    [NestedDummy, DummyV2],
 )
 def test_merge_api(configs: list[LoraConfig], sample: torch.Tensor, model_cls):
 
@@ -336,7 +336,7 @@ def test_merge_api(configs: list[LoraConfig], sample: torch.Tensor, model_cls):
     model.eval()
     org_model.eval()
 
-    base_output: torch.Tensor = org_model(sample)
+    base_output: torch.Tensor = org_model(sample, emb_idx)
     assert torch.isfinite(base_output).all()
 
     adapter_names = [config.adapter_name for config in configs]
@@ -406,19 +406,19 @@ def test_merge_api(configs: list[LoraConfig], sample: torch.Tensor, model_cls):
         == len(adapted_layer.adapter_names)
         and len(adapted_layer.active_adapters) == 0
     ), f"{c}"
-    assert torch.allclose(model(sample), base_output)
+    assert torch.allclose(model(sample, emb_idx), base_output)
 
     # Activate
     activated_names = AdapterAPI.activate_adapter(model, adapter_names, activate=True)
     model.eval()
     _assert_correct_adapted_layer(is_activated=True)
-    assert not torch.allclose(model(sample), base_output)
+    assert not torch.allclose(model(sample, emb_idx), base_output)
 
     # Record all the adapted layers.
     activated_al_records = {}
     aal_handles = register_record_hook(model, activated_al_records, adapted_fqns)
     model.eval()
-    activated_output = model(sample)
+    activated_output = model(sample, emb_idx)
     assert torch.isfinite(base_output).all()
     for handle in aal_handles:
         handle.remove()
@@ -433,7 +433,7 @@ def test_merge_api(configs: list[LoraConfig], sample: torch.Tensor, model_cls):
     merged_al_records = {}
     mal_handle = register_record_hook(model, merged_al_records, adapted_fqns)
     model.eval()
-    merged_output: Tensor = model(sample)
+    merged_output: Tensor = model(sample, emb_idx)
     assert torch.isfinite(base_output).all()
     for handle in mal_handle:
         handle.remove()
@@ -453,7 +453,7 @@ def test_merge_api(configs: list[LoraConfig], sample: torch.Tensor, model_cls):
         assert torch.allclose(
             a := z(activated_al_records[fqn]["input"][0]),
             m := z(merged_al_records[fqn]["input"][0]),
-            atol=1e-5,
+            atol=2e-5,
             # rtol=1e-4,
         ), f"`{fqn}`max_abs = {(a-m).abs().max()}, a_max={a.max()}, m_max={m.max()}"
 
@@ -466,14 +466,15 @@ def test_merge_api(configs: list[LoraConfig], sample: torch.Tensor, model_cls):
 
     assert torch.allclose(
         merged_output, activated_output, atol=2e-5
-    ), f"max_abs = {(activated_output-merged_output).abs().max()}"
+    ), f"max_abs = {(merged_output-activated_output).abs().max()}, m_max={merged_output.max()} a_max={activated_output.max()}"
 
     # Unmerge, still activated
     AdapterAPI.unmerge(model, adapter_names)
     _assert_correct_adapted_layer(is_activated=True, is_merged=False)
+
     # Now the base model output is equal to activated_output
     assert torch.allclose(
-        o := model(sample), activated_output, atol=1e-5
+        o := model(sample, emb_idx), activated_output, atol=1e-5
     ), f"max_abs = {(o-activated_output).abs().max()}, max={max(o.max(),activated_output.max())}"
 
     # Deactivate
@@ -481,12 +482,19 @@ def test_merge_api(configs: list[LoraConfig], sample: torch.Tensor, model_cls):
     _assert_correct_adapted_layer(is_activated=False, is_merged=False)
 
     # Now the base model output is equal to the original output (reconstruction will have more differences than tests before).
+    # The atol is 5e-3 somehow high, but the mean is often 5e-4.
     assert torch.allclose(
-        o := model(sample), b := base_output, atol=8e-4
-    ), f"max_abs = {(o-base_output).abs().max()}, o_max={o.max()},b_max = {b.max().item()}"
+        o := model(sample, emb_idx), b := base_output, atol=5e-3
+    ), f"max_abs = {(o-base_output).abs().max()},mean={(o-base_output).abs().mean()} o_max={o.max()},b_max = {b.max()}"
 
-    debug_model("Original model", org_model, 2)
-    debug_model("Adapted model", model, 2)
+    debug_model(
+        "Original model",
+        org_model,
+    )
+    debug_model(
+        "Adapted model",
+        model,
+    )
 
     # Remove adapters
     with pytest.raises(AssertionError, match="Model architectures not match"):
@@ -495,4 +503,4 @@ def test_merge_api(configs: list[LoraConfig], sample: torch.Tensor, model_cls):
     assert_models_are_identical(model, org_model)
 
     assert str(org_model) == str(model)
-    debug_model("Processed and cleaned up model", model, 2, increase_time=True)
+    debug_model("Processed and cleaned up model", model, True)

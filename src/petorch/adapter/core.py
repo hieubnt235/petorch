@@ -76,9 +76,6 @@ class BaseAdapter(nn.Module):
     def name(self) -> str:
         return self._adapter_name
 
-    def __getitem__(self, item):
-        return getattr(self.config, item)
-
     # noinspection PyMethodMayBeStatic
     def _get_validate_kwargs(self, config, **kwargs: dict):
         from_attributes = kwargs.pop("from_attributes", None)
@@ -227,6 +224,13 @@ class BaseAdaptedLayer(nn.Module, ABC):
     @property
     def is_merged(self) -> bool:
         return len(self._merged_adapter_names) > 0
+
+    def __getattr__(self, item):
+        try:
+            return super().__getattr__(item)
+        except AttributeError:
+            base_layer = super().__getattr__("base_layer")
+            return getattr(base_layer, item)
 
     # ---Private---
 

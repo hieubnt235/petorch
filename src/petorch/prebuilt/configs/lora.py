@@ -1,24 +1,32 @@
 from collections.abc import Callable
-from typing import cast, Unpack
+from typing import Unpack
 
-from pydantic import PositiveInt, NonNegativeFloat, BaseModel, PositiveFloat
+from pydantic import PositiveInt, NonNegativeFloat, PositiveFloat
 from torch import nn
 
 from petorch.adapter import (
     BaseModelAdaptionConfig,
-    BaseAdapter,
     BaseAdaptedLayer,
     ValidateConfigKwargs,
 )
-from petorch.prebuilt.adapters.lora.conv import LoraConv1d, LoraConv2d, LoraConv3d
+from petorch.prebuilt.adapters.lora import (
+    LoraLinear,
+    LoraAdaptedLayer,
+    BaseLoraAdapter,
+    LoraEmbedding,
+    LoraConv1d,
+    LoraConv2d,
+    LoraConv3d,
+)
 from petorch.utilities import TorchInitMethod
-from petorch.prebuilt.adapters.lora import LoraLinear, LoraAdaptedLayer, BaseLoraAdapter
 
 MODULE_ADAPTER_CLASSES_MAP = {
     nn.Linear: LoraLinear,
     nn.Conv1d: LoraConv1d,
     nn.Conv2d: LoraConv2d,
     nn.Conv3d: LoraConv3d,
+    nn.Embedding: LoraEmbedding,
+    nn.Module: None,
 }
 
 

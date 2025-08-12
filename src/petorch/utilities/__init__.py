@@ -1,5 +1,5 @@
 from enum import Enum
-
+from .modules import *
 from torch.nn.init import (
     normal_,
     uniform_,
