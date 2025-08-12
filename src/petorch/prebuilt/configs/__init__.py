@@ -1,1 +1,1 @@
-from .configs import *
+from .lora import LoraConfig

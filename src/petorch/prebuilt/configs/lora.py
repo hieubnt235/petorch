@@ -10,11 +10,19 @@ from petorch.adapter import (
     BaseAdaptedLayer,
     ValidateConfigKwargs,
 )
+from petorch.prebuilt.adapters.lora.conv import LoraConv1d, LoraConv2d, LoraConv3d
 from petorch.utilities import TorchInitMethod
-from petorch.prebuilt.adapters.lora import LoraLinear, LoraAdaptedLayer
+from petorch.prebuilt.adapters.lora import LoraLinear, LoraAdaptedLayer, BaseLoraAdapter
+
+MODULE_ADAPTER_CLASSES_MAP = {
+    nn.Linear: LoraLinear,
+    nn.Conv1d: LoraConv1d,
+    nn.Conv2d: LoraConv2d,
+    nn.Conv3d: LoraConv3d,
+}
 
 
-class LoraLinearModelConfig(BaseModelAdaptionConfig):
+class LoraConfig(BaseModelAdaptionConfig):
     rank: PositiveInt = 8
     alpha: PositiveInt = 16
     dropout: NonNegativeFloat = 0.1
@@ -30,22 +38,23 @@ class LoraLinearModelConfig(BaseModelAdaptionConfig):
         lora_a_init_method: TorchInitMethod | Callable | None = None,
         lora_b_init_method: TorchInitMethod | Callable | None = None,
         **kwargs: Unpack[ValidateConfigKwargs]
-    ) -> BaseAdapter | None:
-        if isinstance(base_layer, nn.Linear):
-            lora_linear = LoraLinear(
-                cast(nn.Linear, base_layer), cast(BaseModel, self), **kwargs
-            )
+    ) -> BaseLoraAdapter | None:
+        adapter_cls = MODULE_ADAPTER_CLASSES_MAP.get(type(base_layer), None)
+
+        if adapter_cls is not None:
+            assert issubclass(adapter_cls, BaseLoraAdapter)
+            adapter = adapter_cls(base_layer, self, **kwargs)
             # init
             lora_a_init_method = lora_a_init_method or lora_init_method
             lora_b_init_method = lora_b_init_method or lora_init_method
             if lora_a_init_method:
-                lora_a_init_method(lora_linear.lora_A.weight)
+                lora_a_init_method(adapter.lora_A.weight)
             if lora_b_init_method:
-                lora_b_init_method(lora_linear.lora_B.weight)
-                if lora_linear.is_bias:
-                    lora_b_init_method(lora_linear.lora_B.bias)
+                lora_b_init_method(adapter.lora_B.weight)
+                if adapter.is_bias:
+                    lora_b_init_method(adapter.lora_B.bias)
+            return adapter
 
-            return lora_linear
         return None
 
     def dispatch_adapted_layer(

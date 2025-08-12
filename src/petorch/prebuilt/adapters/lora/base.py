@@ -1,3 +1,4 @@
+import warnings
 from abc import ABC, abstractmethod
 from typing import Unpack, cast, Type
 
@@ -26,18 +27,17 @@ class BaseLoraAdapter(BaseAdapter, ABC):
     config_class = LoraAdapterConfig
     base_layer_class: Type[nn.Module]
 
-    def __init_subclass__(cls, **kwargs):
-        super().__init_subclass__(**kwargs)
-        assert issubclass(
-            cls.base_layer_class, nn.Module
-        ), f"`base_layer_class` must be the subclass of `torch.nn.Module`. Got `{cls.base_layer_class}`."
-
     def __init__(
         self,
         base_layer: nn.Module,
         config: dict | BaseModel,
         **kwargs: Unpack[ValidateConfigKwargs],
     ):
+        assert (
+            issubclass((blc := getattr(self, "base_layer_class", nn.Module)), nn.Module)
+            and type(blc) != nn.Module
+        ), f"Subclass must declare `base_layer_class` as a subclass of {nn.Module} but not be it. Got {blc}"
+
         assert isinstance(
             base_layer, self.base_layer_class
         ), f"Base layer must has type {self.base_layer_class}, got {type(base_layer)}."
@@ -61,14 +61,19 @@ class BaseLoraAdapter(BaseAdapter, ABC):
         if (b := getattr(self.lora_A, "bias", None)) is not None:
             raise ValueError(f"Not allow bias in `lora_A`. Got bias=`{b}`.")
 
+        if self.is_lora_B_bias and not self.is_bias:
+            warnings.warn(
+                f"Unexpected behavior: `lora_B` has bias while base or config does not have (by checking `is_bias` property)."
+                f"The bias of `lora_B` should depend on the `is_bias` property."
+            )
+
     # ---Abstract methods---
 
     @abstractmethod
     def _init_lora_layers(self) -> None:
-        """Override this method to change `self.lora_A` and `self.lora_B`"""
-
-    def get_delta(self, batch_input: torch.Tensor) -> torch.tensor:
-        return self.lora_B(self.lora_A(self.lora_dropout(batch_input))) * self.scaling
+        """Override this method to change `self.lora_A` and `self.lora_B`.
+        The `bias` of lora B should depend on the `is_bias` attribute.
+        """
 
     @abstractmethod
     def get_delta_weight(self) -> torch.Tensor:
@@ -79,9 +84,15 @@ class BaseLoraAdapter(BaseAdapter, ABC):
         """
         pass
 
-    @abstractmethod
+    # ---Optional override---
+
     def get_delta_bias(self) -> torch.Tensor | None:
-        pass
+        if self.is_bias:
+            return self.lora_B.bias * self.scaling
+        return None
+
+    def get_delta(self, batch_input: torch.Tensor) -> torch.tensor:
+        return self.lora_B(self.lora_A(self.lora_dropout(batch_input))) * self.scaling
 
     # ---Properties---
 
@@ -90,8 +101,32 @@ class BaseLoraAdapter(BaseAdapter, ABC):
         return cast(LoraAdapterConfig, super().config)
 
     @property
+    def is_lora_B_bias(self) -> bool:
+        if not isinstance(self.lora_B, nn.Module):
+            raise ValueError(
+                "This property does not expected to access before `lora_B` is initialized. Use `is_bias` instead."
+            )
+        return (
+            True
+            if isinstance(getattr(self.lora_B, "bias", None), nn.Parameter)
+            else False
+        )
+
+    @property
     def is_bias(self) -> bool:
-        return self.config.bias and (cast(nn.Linear, self.base_layer).bias is not None)
+        if self.lora_B is not None:
+            assert isinstance(self.lora_B, nn.Module)
+            is_lora_B_bias = self.is_lora_B_bias
+        else:
+            # For checking bias during init lora_B.
+            is_lora_B_bias = True
+
+        is_base_bias = (
+            True
+            if isinstance(getattr(self.base_layer, "bias", None), nn.Parameter)
+            else False
+        )
+        return is_lora_B_bias and is_base_bias and self.config.bias
 
     @property
     def rank(self) -> int:

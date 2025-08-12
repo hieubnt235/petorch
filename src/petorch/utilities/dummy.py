@@ -18,29 +18,31 @@ class Dummy(nn.Module):
         self.ln2 = nn.LayerNorm(100)
 
     def forward(self, x: torch.Tensor):
-        assert x.shape[2:] == self.input_shape, f"{x.shape[:2]}-{self.input_shape}"
-        # Apply normalization and activation
+        assert x.shape[2:] == self.input_shape
+
         x = self.relu(self.bn(self.conv(x)))
         x = self.flatten(x)
-        x = self.relu(self.ln1(self.fc1(x)))
-        x = self.ln2(self.fc2(x))  # No activation on the final output
-        return x
 
+        x = self.ln1(self.relu(self.fc1(x)))
+
+        x = self.ln2(self.fc2(x))
+        return x
+    
+    
 
 class NestedDummy(nn.Module):
     def __init__(self):
         super().__init__()
         self.conv = nn.Conv2d(3, 3, 3, padding="same")
-        self.bn = nn.BatchNorm2d(3)  # <-- ADDED
+        self.bn = nn.BatchNorm2d(3)
         self.relu = nn.ReLU()
-
-        self.sub_model = Dummy()  # <-- Uses the stable version
-
+        self.sub_model = Dummy()
         self.fc = nn.Linear(100, 16)
-        self.ln = nn.LayerNorm(16)  # <-- ADDED
+        self.ln = nn.LayerNorm(16)
 
     def forward(self, x: torch.Tensor):
         x = self.relu(self.bn(self.conv(x)))
         x = self.sub_model(x)
-        x = self.ln(self.fc(x))
+
+        x = self.ln(self.relu(self.fc(x)))
         return x

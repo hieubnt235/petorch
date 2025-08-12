@@ -4,14 +4,16 @@ from typing import cast
 import pytest
 import torch
 from torch import nn
+from torch.nn.modules.conv import _ConvNd
 
+from petorch.prebuilt.adapters.lora.conv import LoraConvNd
 from petorch.prebuilt.configs import LoraConfig
 from petorch.prebuilt.adapters.lora import LoraAdaptedLayer, LoraLinear
 from petorch.utilities import TorchInitMethod
+from tests.prebuilt.adapters.lora.test_linear import linear_size
 
-adapter_name = "test_prebuild_linear_lora_adapter"
+adapter_name = "test_prebuild_conv_lora_adapter"
 fqname = "base_layer_fqname"
-linear_size = (32, 32)
 
 """Vary these variableS to the large numbers for ensuring the testing is True for most cases. But the test will run for a longer time."""
 
@@ -24,6 +26,8 @@ NUM_TEST_CONFIG_LISTS = 10
 NUM_CONCURRENT_ADAPTERS = 10
 """For testing with multi adapters, this is the number of adapter model have at the same time. """
 
+conv_args = (3, 4, 3, 1, "same")
+
 
 @torch.no_grad()
 @pytest.mark.parametrize(
@@ -33,24 +37,29 @@ NUM_CONCURRENT_ADAPTERS = 10
         LoraConfig(adapter_name=adapter_name, bias=True),
     ],
 )
+@pytest.mark.parametrize(
+    "base_layer", [nn.Conv1d(*conv_args), nn.Conv2d(*conv_args), nn.Conv3d(*conv_args)]
+)
 @pytest.mark.parametrize("base_layer_bias", [True, False])
 @pytest.mark.parametrize("dropout", [0, 0.5])
-@pytest.mark.parametrize(
-    "sample", [torch.randn([2, 32]) for _ in range(NUM_TEST_SAMPLES)]
-)  # Test many random tensors for ensuring it's general for all cases.
-def test_lora_linear_single_adapter(config, base_layer_bias, dropout, sample):
-    base_layer = nn.Linear(*linear_size, bias=base_layer_bias)
+def test_lora_conv_single_adapter(
+    config, base_layer: _ConvNd, base_layer_bias, dropout
+):
+    kernel_dim = base_layer.weight.dim()
+    sample = torch.rand([NUM_TEST_SAMPLES, conv_args[0]] + [16] * (kernel_dim - 2))
+
     config.dropout = dropout
     adapted_layer = config.dispatch_adapted_layer(fqname, base_layer)
     adapted_layer.eval()
+
     zero_init_adapter = config.dispatch_adapter(
         fqname, base_layer, lora_init_method=TorchInitMethod.zeros
     )
     ones_init_adapter = config.dispatch_adapter(
         fqname, base_layer, lora_init_method=TorchInitMethod.ones
     )
-    assert isinstance(zero_init_adapter, LoraLinear)
-    assert isinstance(ones_init_adapter, LoraLinear)
+    assert isinstance(zero_init_adapter, LoraConvNd)
+    assert isinstance(ones_init_adapter, LoraConvNd)
 
     # ---Zero init---
     adapted_layer._add_adapters(zero_init_adapter, activate=False)
@@ -158,10 +167,12 @@ def _make_adapter_configs(num_current_adapters: int) -> list[LoraConfig]:
     ],
 )
 @pytest.mark.parametrize(
-    "sample", [torch.randn([2, 32]) for _ in range(NUM_TEST_SAMPLES)]
+    "base_layer", [nn.Conv1d(*conv_args), nn.Conv2d(*conv_args), nn.Conv3d(*conv_args)]
 )
-def test_lora_linear_multi_adapters(sample, configs):
-    base_layer = nn.Linear(*linear_size, bias=True)
+def test_lora_conv_multi_adapters(base_layer, configs):
+    kernel_dim = base_layer.weight.dim()
+    sample = torch.rand([NUM_TEST_SAMPLES, conv_args[0]] + [16] * (kernel_dim - 2))
+
     adapters = [
         cast(LoraConfig, config).dispatch_adapter(fqname, base_layer)
         for config in configs
