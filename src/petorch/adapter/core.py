@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Sequence, cast, Any, TypedDict, Type, Unpack
-
+from loguru import logger
 import torch
 from pydantic import BaseModel, ConfigDict, Field
 from torch import nn
@@ -118,12 +118,18 @@ class BaseAdaptedLayer(nn.Module, ABC):
 
     """
 
+    act_adt_key: str = "active_adapters"
+    non_act_adt_key: str = "non_active_adapters"
+
     def __init__(self, base_layer: nn.Module, *args, **kwargs):
         super().__init__()
 
         self.base_layer = base_layer
         self.active_adapters = nn.ModuleDict()
         self.non_active_adapters = nn.ModuleDict()
+
+        assert getattr(self, self.act_adt_key) == self.active_adapters
+        assert getattr(self, self.non_act_adt_key) == self.non_active_adapters
 
         self._merged_adapter_names: list[str] = []
         """`merge` and `unmerge` method will modify this list only."""
@@ -283,6 +289,113 @@ class BaseAdaptedLayer(nn.Module, ABC):
                 except KeyError:
                     pass
         return removed_adapters
+
+    def _get_adapter_state_dict(
+        self,
+        adapter_names: str | Sequence[str],
+        *,
+        active_only: bool = False,
+        non_active_only: bool = False,
+    ) -> dict[str, torch.Tensor]:
+        """
+        Get layer state dict, remove base_layer and filter adapter.
+        Args:
+            adapter_names:
+            active_only:
+            non_active_only:
+
+        Returns:
+            A state dictionary whose adapter keys are started with "active_adapters" or "non_active_adapters"
+             and addition keys if exists.
+
+        """
+        if active_only and non_active_only:
+            raise ValueError(
+                "`active_only` and `non_active_only` cannot be set at the same time."
+            )
+        adapter_names = (
+            [adapter_names] if isinstance(adapter_names, str) else list(adapter_names)
+        )
+
+        # Raw state_dict
+        state_dict = self.state_dict()
+        # logger.debug(f"Raw AdaptedLayer state_dict keys: {'\n'.join(list(state_dict.keys()))}")
+
+        # Collect keys to delete
+        del_keys = []
+        k_del_start = None
+        if active_only:
+            k_del_start = self.non_act_adt_key
+        if non_active_only:
+            k_del_start = self.act_adt_key
+        if k_del_start:
+            del_keys.extend([k for k in state_dict.keys() if k.startswith(k_del_start)])
+
+        for key in state_dict.keys():
+            # Delete base_layer keys
+            if key.startswith("base_layer"):
+                del_keys.append(key)
+                continue
+            else:
+                # Delete keys that not contain adapter name in it.
+                is_contain_name = False
+                for name in adapter_names:
+                    if name in key:
+                        is_contain_name = True
+                        break
+                if not is_contain_name:
+                    del_keys.append(key)
+
+        for key in del_keys:
+            logger.debug(f"del_key: `{key}`")
+            del state_dict[key]
+
+        return state_dict
+
+    def _load_adapter_state_dict(
+        self,
+        state_dict: dict[str, torch.Tensor],
+        strict_activation: bool = False,
+        strict_load: bool = False,
+    ) -> tuple[list[str], list[str]]:
+        """
+
+        Args:
+            state_dict: Adapter keys must be start with "non_active_adapter." or "active_adapter.".
+            strict_activation: Only load when the state dict activation state is matched.
+            strict_load: pass to the ` strict ` argument of `Module.load_state_dict`.
+        Returns:
+            (From Module.load_state_dict): `NamedTuple` with ``missing_keys`` and ``unexpected_keys`` fields:
+            
+                * **missing_keys** is a list of str containing any keys that are expected
+                    by this module but missing from the provided ``state_dict``.
+                * **unexpected_keys** is a list of str containing the keys that are not
+                    expected by this module but present in the provided ``state_dict``.
+        """
+
+        final_state_dict = {}
+        for key, weight in state_dict.items():
+            if (
+                key.startswith(self.non_act_adt_key + ".")
+                or key.startswith(self.act_adt_key + ".")
+            ) and not strict_activation:
+                splits = key.split(".")
+                attr_key, adt_key = splits[0], splits[1]
+                if adt_key in self.active_adapters.keys():
+                    key = f"{self.act_adt_key}.{".".join(splits[1:])}"
+                elif adt_key in self.non_active_adapters.keys():
+                    key = f"{self.non_act_adt_key}.{".".join(splits[1:])}"
+
+            final_state_dict[key] = weight
+
+        # Get base layer state dict, for not raise error because of base_layer key not available.
+        base_layer_state_dict = self.base_layer.state_dict(prefix="base_layer.")
+        for k, v in base_layer_state_dict.items():
+            # Check that adapter state dict overrides the base layer state dict; this is unexpected behavior.
+            assert k not in final_state_dict
+            final_state_dict[k] = v
+            
+        return self.load_state_dict(final_state_dict, strict=strict_load)
 
     @dataclass
     class _ActivateFlags:

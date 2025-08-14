@@ -1,11 +1,12 @@
-from typing import cast
+from typing import cast, Literal
 
 import torch
 import torch.nn.functional as F
+from pydantic import model_validator
 from torch import nn
 
 from petorch.utilities import ParamWrapper
-from .base import BaseLoraAdapter
+from .base import BaseLoraAdapter, LoraAdapterConfig
 
 
 class LoraEmbedding(BaseLoraAdapter):
@@ -23,6 +24,7 @@ class LoraEmbedding(BaseLoraAdapter):
             None,
             None,
         )
+        self.config.bias=False # Todo: this step should be in init method for more clean in purpose of this method.
         assert not self.is_bias
 
     def get_delta_weight(self) -> torch.Tensor:

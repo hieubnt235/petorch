@@ -1,5 +1,5 @@
 from copy import deepcopy
-from typing import Sequence, cast, Unpack, Any
+from typing import Sequence, cast, Unpack, Any, Self
 
 import torch
 from pydantic import BaseModel
@@ -12,26 +12,137 @@ from .core import (
     ValidateConfigKwargs,
 )
 
-__ADT_API_ATTR__ = "__PETORCH_ADAPTER_NAMES_ATTRIBUTE_NAME__"
-"""This is private attributes that will be injected to the original model to keep tracks of metadata."""
+
+def _resolve_adapter_names(
+    model: nn.Module, adapter_names: str | list[str] | None = None
+) -> list[str]:
+    """
+    Check if given adapter names are available in a model, else raise an error.
+    If `adapter_names` is None, return all available adapter names in the module.
+    Args:
+        model:
+        adapter_names:
+
+    Returns:
+        A list of all valid adapter names.
+
+    """
+    if (adt_names := AdapterAPI.get_adapter_names(model)) is None:
+        raise ValueError(f"Model does not have any adapter.")
+
+    if adapter_names is not None:
+        adapter_names = (
+            [adapter_names] if isinstance(adapter_names, str) else list(adapter_names)
+        )
+        for adt_name in adapter_names:
+            if adt_name not in adt_names:
+                raise ValueError(f"Model does not have adapter named `{adt_name}`.")
+    else:
+        adapter_names = adt_names
+    assert len(adapter_names) > 0  # Not allow a blank list
+    return adapter_names
+
+
+def _merge_or_unmerge_(
+    model: nn.Module,
+    adapter_names: str | list[str] | None = None,
+    *args,
+    merge: bool,
+    **kwargs,
+) -> Any:
+    """Not call this method directly, it does not ensure for no_grad."""
+    adapter_names = _resolve_adapter_names(model, adapter_names)
+    merge_fqnames: list[str] = []
+
+    # Collect first for avoiding the case that _merge implementation change the architecture.
+    for fqname, layer in model.named_modules():
+        if isinstance(layer, BaseAdaptedLayer):
+            merge_fqnames.append(fqname)
+    assert len(merge_fqnames) > 0
+
+    for fqname in merge_fqnames:
+        layer = model.get_submodule(fqname)
+        assert isinstance(layer, BaseAdaptedLayer)
+        if merge:
+            layer._merge(adapter_names, *args, **kwargs)
+        else:
+            layer._unmerge(adapter_names, *args, **kwargs)
+
+        layer._validate_after_merge_or_unmerge(*args, **kwargs)
+    model.train(model.training)
+
+
+class __AdapterMeta__:
+    """
+    This class will be injected to the model to record adapter meta.
+    """
+
+    class MetaModel(BaseModel):
+        adapted_fqnames: list[str]
+        config: BaseModelAdaptionConfig
+
+    __ADT_META_ATTR__ = "__PETORCH_META_ATTRIBUTE_KEY__"
+
+    def __init__(self):
+        self._private_dict: dict[str, self.MetaModel] = {}
+        """adapter_name:(list_of_fqname, config)"""
+
+    @property
+    def _adapted_fqns(self) -> list[str]:
+        fqn = []
+        for meta in self._private_dict.values():
+            fqn.extend(meta.adapted_fqnames)
+        return list(set(fqn))
+
+    @property
+    def _adaption_configs(self) -> dict[str, BaseModelAdaptionConfig]:
+        configs = {}
+        for name, meta in self._private_dict.items():
+            configs[name] = meta.config
+        return configs
+
+    def _add_meta(self, m: MetaModel) -> Self:
+        assert m.config.adapter_name not in self._private_dict.keys()
+
+        assert isinstance(m, self.MetaModel) and len(m.adapted_fqnames) > 0
+        self._private_dict[m.config.adapter_name] = m
+        return self
+
+    def _remove_meta(self, name: str) -> MetaModel:
+        return self._private_dict.pop(name)
+
+    def __getattr__(self, item):
+        return getattr(self._private_dict, item)
+
+    def __len__(self):
+        return len(self._private_dict)
+
+    @classmethod
+    def _get_from_obj(cls, obj) -> Self | None:
+        meta = getattr(obj, cls.__ADT_META_ATTR__, None)
+        assert isinstance(meta, cls) or (meta is None)
+        return meta
+
+    @classmethod
+    def _remove_from_obj(cls, obj, safe_check: bool = True) -> Self:
+        if safe_check:
+            assert isinstance(cls._get_from_obj(obj), cls)
+            delattr(obj, cls.__ADT_META_ATTR__)
+            assert cls._get_from_obj(obj) is None
+        else:
+            delattr(obj, cls.__ADT_META_ATTR__)
+
+    @classmethod
+    def _set_to_obj(cls, self, obj) -> Self:
+        assert self._get_from_obj(obj) is None
+        setattr(obj, self.__ADT_META_ATTR__, self)
+        return self
+
+    def _set_self_to_obj(self, obj) -> Self:
+        return self._set_to_obj(self, obj)
 
 
 class AdapterAPI:
-    
-    class __AdapterNameList__:
-        """
-        This class will be injected to the model to record adapter names.
-        """
-
-        def __init__(self):
-            self._private_list = []
-
-        def append(self, v):
-            assert v not in self._private_list
-            self._private_list.append(v)
-
-        def remove(self, v):
-            self._private_list.remove(v)
 
     @staticmethod
     @torch.no_grad()
@@ -45,13 +156,60 @@ class AdapterAPI:
             list of adapter names with len always >0 or None if no adapter is added (Model is now the raw, original model.).
 
         """
-        adt_names = getattr(model, __ADT_API_ATTR__, None)
-        if adt_names is not None:
-            assert isinstance(adt_names, AdapterAPI.__AdapterNameList__)
+        adt_meta = __AdapterMeta__._get_from_obj(model)
+        if adt_meta is not None:
             assert (
-                len(adt_names._private_list) > 0
+                len(adt_meta) > 0
             )  # Object with len=0 must be deleted and getattr return None.
-            return deepcopy(adt_names._private_list)
+            return list(adt_meta.keys())
+
+        return None
+
+    @staticmethod
+    @torch.no_grad()
+    def get_adapted_fqnames(
+        model: nn.Module, sort: bool = True, *args, **kwargs
+    ) -> list[str] | None:
+        """
+
+        Args:
+            model:
+            sort:
+
+        Returns:
+            A list of adapted layer's fq names with len always >0 or None if the model does not have any adapter.
+
+        """
+        meta = __AdapterMeta__._get_from_obj(model)
+        if meta is not None:
+            assert isinstance(meta, __AdapterMeta__)
+            assert len(m_fqn := meta._adapted_fqns) > 0
+            if sort:
+                m_fqn.sort(
+                    key=kwargs.pop("key", None), reverse=kwargs.pop("reverse", False)
+                )
+            return m_fqn
+        return None
+
+    @staticmethod
+    @torch.no_grad()
+    def get_adaption_configs(
+        model: nn.Module,
+    ) -> dict[str, BaseModelAdaptionConfig] | None:
+        """
+        Args:
+            model:
+
+        Returns:
+            A dict of all configs as values and keys are adapter_name with length always >0.
+             Return None if no adapter is added (Model is now the raw, original model.).
+
+        """
+        meta = __AdapterMeta__._get_from_obj(model)
+        if meta is not None:
+            assert isinstance(meta, __AdapterMeta__)
+            assert len(configs := meta._adaption_configs) > 0
+            return configs
         return None
 
     @staticmethod
@@ -68,14 +226,13 @@ class AdapterAPI:
             kwargs: Will be passed to **config.dispatch_layer_adapter** and **config.dispatch_adapted_layer**.
         Returns:
             list of Fully qualified names that adapter is added.
-            If blank, adapter haven't been added to model because of `dispatch_layer_adapter` always return None .
+            If blank, adapter haven't been added to model because of `dispatch_layer_adapter` always return None.
 
         Raises:
             ValueError: If adapter name already exists.
 
         Notes:
             The config added will take a deepcopy.
-
 
         """
         if (adt_names := AdapterAPI.get_adapter_names(model)) is not None:
@@ -151,12 +308,23 @@ class AdapterAPI:
 
         # Update model.__ADT_NAMES_ATTR__, create new if not exists.
         if len(adapted_fqnames) > 0:
-            if not hasattr(model, __ADT_API_ATTR__):
-                adt_name_list = AdapterAPI.__AdapterNameList__()
-                adt_name_list.append(config.adapter_name)
-                setattr(model, __ADT_API_ATTR__, adt_name_list)
+            adt_meta = __AdapterMeta__._get_from_obj(model)
+            if adt_meta is None:
+                adt_meta = (
+                    __AdapterMeta__()
+                    ._add_meta(
+                        __AdapterMeta__.MetaModel(
+                            adapted_fqnames=adapted_fqnames, config=deepcopy(config)
+                        )
+                    )
+                    ._set_self_to_obj(model)
+                )
             else:
-                getattr(model, __ADT_API_ATTR__).append(config.adapter_name)
+                adt_meta._add_meta(
+                    __AdapterMeta__.MetaModel(
+                        adapted_fqnames=adapted_fqnames, config=deepcopy(config)
+                    )
+                )
 
         model.train(model.training)
         return adapted_fqnames
@@ -170,6 +338,8 @@ class AdapterAPI:
     ) -> None:
         """
         Update Adapter to a new config. So that model will be used new attributes new config.
+        This method is intentionally change attributes, properties for the model to work (with forward or merge),
+        not change the model itself.
 
         Notes:
             This method does not update adapter schema, it just only add config to current adapter layer.
@@ -232,7 +402,7 @@ class AdapterAPI:
         not_change_adapters: set[str] = set()
         not_found_adapters: set[str] = set()
 
-        adapter_names = AdapterAPI._resolve_adapter_names(model, adapter_names)
+        adapter_names = _resolve_adapter_names(model, adapter_names)
 
         # Collect fqnames of BaseAdaptedLayers
         activate_fqnames: list[str] = []
@@ -273,6 +443,13 @@ class AdapterAPI:
 
         model.train(model.training)
         return list(change_adapters)
+    
+    @staticmethod
+    def deactivate_adapter(
+        model: nn.Module,
+        adapter_names: str | Sequence[str] | None = None,
+    ) -> list[str]:
+        return AdapterAPI.activate_adapter(model, adapter_names, activate=False)
 
     @staticmethod
     @torch.no_grad()
@@ -291,7 +468,7 @@ class AdapterAPI:
 
         """
 
-        adapter_names = AdapterAPI._resolve_adapter_names(model, adapter_names)
+        adapter_names = _resolve_adapter_names(model, adapter_names)
 
         not_found_adapter_names = (
             {adapter_names} if isinstance(adapter_names, str) else set(adapter_names)
@@ -313,7 +490,7 @@ class AdapterAPI:
                     not_found_adapter_names.remove(removed_name)
 
             if len(rm_adt) > 0:
-                # If there's no adapter in module after removing, switch it to base layer.
+                # If there's no adapter in the module after removing, switch it to base layer.
                 if len(layer.adapter_names) == 0:
                     model.set_submodule(fqname, layer.base_layer, strict=True)
             else:
@@ -321,83 +498,169 @@ class AdapterAPI:
                 # Because when after removing and no adapters remain, it already switched to baselayer, no more adapted layer.
                 assert len(layer.adapter_names) > 0
 
-        # All adapters must be found in model (there's at least one adapted layer has specific adapter).
+        # All adapters must be found in the model (there's at least one adapted layer has specific adapter).
         assert len(not_found_adapter_names) == 0
 
-        _adapter_name_list = cast(
-            AdapterAPI.__AdapterNameList__, getattr(model, __ADT_API_ATTR__)
-        )
-        for adt_name in adapter_names:
-            _adapter_name_list.remove(adt_name)
-        if len(_adapter_name_list._private_list) == 0:
-            delattr(model, __ADT_API_ATTR__)
+        adt_meta = __AdapterMeta__._get_from_obj(model)
 
+        for adt_name in adapter_names:
+            adt_meta._remove_meta(adt_name)
+        if len(adt_meta) == 0:
+            __AdapterMeta__._remove_from_obj(model)
         model.train(model.training)
+
+    @staticmethod
+    @torch.no_grad()
+    def get_adapter_state_dict(
+        model,
+        adapter_names: str | list[str] | None = None,
+        *args,
+        from_meta: bool = True,
+        validate_meta: bool = True,
+        active_only: bool = False,
+        non_active_only: bool = False,
+        **kwargs,
+    ) -> dict[str, torch.Tensor]:
+        """
+
+        Args:
+            model:
+            adapter_names:
+            *args:
+
+            # --- Below arguments usually be default almost cases. ---
+            non_active_only:
+            active_only:
+            from_meta: Whether to extract adapter from meta, or loop and extract the entire model.
+             Default is `True` and should be `True`.
+            validate_meta: Whether to validate that state dict is sync with the meta. Only be used when `from_meta=False`.
+             Default is `True` and should be `True`.
+            **kwargs:
+
+        Returns:
+            A dictionary whose keys are fqname of base layer and values are a dict of adapter names and their state dicts.
+        """
+        adapter_names = _resolve_adapter_names(model, adapter_names)
+        adapted_fqn = AdapterAPI.get_adapted_fqnames(model)
+        assert isinstance(adapted_fqn, list)  # Model must have one adapter.
+
+        state_dict: dict[str, torch.Tensor] = {}
+
+        def _get_and_update_state_dict(adapted_layer: BaseAdaptedLayer, pre_fqn):
+            layer_state_dict = adapted_layer._get_adapter_state_dict(
+                adapter_names,
+                active_only=active_only,
+                non_active_only=non_active_only,
+            )
+            state_dict.update(
+                {f"{pre_fqn}.{k}": v for k, v in layer_state_dict.items()}
+            )
+
+        if from_meta:
+            for fqn in adapted_fqn:
+                adapted_layer = model.get_submodule(fqn)
+                assert isinstance(adapted_layer, BaseAdaptedLayer)
+                _get_and_update_state_dict(adapted_layer, fqn)
+        else:
+            manual_fqn: list[str] = []
+            for fqn, module in model.named_modules():
+                if isinstance(module, BaseAdaptedLayer):
+                    manual_fqn.append(fqn)
+                    adapted_layer = cast(BaseAdaptedLayer, module)
+                    _get_and_update_state_dict(adapted_layer, fqn)
+            if validate_meta:
+                manual_fqn.sort()
+                adapted_fqn.sort()
+                assert manual_fqn == adapted_fqn
+
+        return state_dict
+
+    @staticmethod
+    @torch.no_grad()
+    def load_adapter_state_dict(
+        model,
+        state_dict: dict[str, torch.Tensor],
+        *args,
+        from_meta: bool = True,
+        validate_meta: bool = True,
+        strict_activation: bool = False,
+        strict_load: bool = False,
+        **kwargs,
+    ) -> dict[str, dict[str, list[str]]]:
+        """
+
+        Args:
+            model:
+            state_dict:
+            *args:
+
+            # --- Below arguments usually be default almost cases. ---
+            strict_activation: Only load when the state dict activation state is matched.
+            strict_load: pass to the ` strict ` argument of `Module.load_state_dict`.
+            validate_meta:
+            from_meta:
+            **kwargs:
+
+        Returns:
+            A dict whose keys are fqn to the base layer,
+            values are a dict with `missing_keys` and `unexpected_keys` returned from `Module.load_state_dict`.
+        """
+
+        adapter_state_dict: dict[str, torch.Tensor] = {}
+        adapted_fqn = AdapterAPI.get_adapted_fqnames(model)
+        assert isinstance(adapted_fqn, list)  # Model must have one adapter.
+
+        not_load_keys: dict[str, dict[str, list[str]]] = {}
+
+        def _compose_and_load_adapter_state_dict(
+            adapted_layer: BaseAdaptedLayer, fqn: str
+        ):
+            # Compose
+            new_state_dict = {}
+            for key, weight in state_dict.items():
+                if key.startswith(fqn):
+                    new_state_dict[key.removeprefix(fqn + ".")] = weight
+
+            if new_state_dict != {}:
+                missing_keys, unexpected_keys = adapted_layer._load_adapter_state_dict(
+                    new_state_dict, strict_activation, strict_load
+                )
+                if missing_keys or unexpected_keys:
+                    not_load_keys[fqn] = dict(
+                        missing_keys=missing_keys, unexpected_keys=unexpected_keys
+                    )
+
+        if from_meta:
+            for fqn in adapted_fqn:
+                adapted_layer = model.get_submodule(fqn)
+                assert isinstance(adapted_layer, BaseAdaptedLayer)
+                _compose_and_load_adapter_state_dict(adapted_layer, fqn)
+
+        else:
+            manual_fqn: list[str] = []
+            for fqn, module in model.named_modules():
+                if isinstance(module, BaseAdaptedLayer):
+                    manual_fqn.append(fqn)
+                    adapted_layer = cast(BaseAdaptedLayer, module)
+                    _compose_and_load_adapter_state_dict(adapted_layer, fqn)
+
+            if validate_meta:
+                manual_fqn.sort()
+                adapted_fqn.sort()
+                assert manual_fqn == adapted_fqn
+
+        return not_load_keys
 
     @staticmethod
     @torch.no_grad()
     def merge(
         model: nn.Module, adapter_names: str | list[str] | None = None, *args, **kwargs
     ):
-        return AdapterAPI._merge_or_unmerge_(
-            model, adapter_names, *args, merge=True, **kwargs
-        )
+        return _merge_or_unmerge_(model, adapter_names, *args, merge=True, **kwargs)
 
     @staticmethod
     @torch.no_grad()
     def unmerge(
         model: nn.Module, adapter_names: str | list[str] | None = None, *args, **kwargs
     ):
-        return AdapterAPI._merge_or_unmerge_(
-            model, adapter_names, *args, merge=False, **kwargs
-        )
-
-    @staticmethod
-    def _merge_or_unmerge_(
-        model: nn.Module,
-        adapter_names: str | list[str] | None = None,
-        *args,
-        merge: bool,
-        **kwargs,
-    ) -> Any:
-        """Not call this method directly, it does not ensure for no_grad."""
-        adapter_names = AdapterAPI._resolve_adapter_names(model, adapter_names)
-        merge_fqnames: list[str] = []
-
-        # Collect first for avoiding the case that _merge implementation change the architecture.
-        for fqname, layer in model.named_modules():
-            if isinstance(layer, BaseAdaptedLayer):
-                merge_fqnames.append(fqname)
-        assert len(merge_fqnames) > 0
-
-        for fqname in merge_fqnames:
-            layer = model.get_submodule(fqname)
-            assert isinstance(layer, BaseAdaptedLayer)
-            if merge:
-                layer._merge(adapter_names, *args, **kwargs)
-            else:
-                layer._unmerge(adapter_names, *args, **kwargs)
-
-            layer._validate_after_merge_or_unmerge(*args, **kwargs)
-        model.train(model.training)
-
-    @staticmethod
-    def _resolve_adapter_names(
-        model: nn.Module, adapter_names: str | list[str] | None = None
-    ) -> list[str]:
-        if (adt_names := AdapterAPI.get_adapter_names(model)) is None:
-            raise ValueError(f"Model does not have any adapter.")
-
-        if adapter_names is not None:
-            adapter_names = (
-                [adapter_names]
-                if isinstance(adapter_names, str)
-                else list(adapter_names)
-            )
-            for adt_name in adapter_names:
-                if adt_name not in adt_names:
-                    raise ValueError(f"Model does not have adapter named `{adt_name}`.")
-        else:
-            adapter_names = adt_names
-        assert len(adapter_names) > 0  # Not allow blank list
-        return adapter_names
+        return _merge_or_unmerge_(model, adapter_names, *args, merge=False, **kwargs)

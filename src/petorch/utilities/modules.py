@@ -89,7 +89,7 @@ class ParamWrapper(nn.Module):
         bias: torch.Tensor | nn.Parameter | None = None,
     ):
         super().__init__()
-
+        
         self.weight = (
             nn.Parameter(weight) if isinstance(weight, torch.Tensor) else weight
         )
@@ -108,3 +108,4 @@ class ParamWrapper(nn.Module):
 
     def forward(self, *args, **kwargs) -> Any:
         raise NotImplementedError
+

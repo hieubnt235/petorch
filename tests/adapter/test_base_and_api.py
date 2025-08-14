@@ -1,6 +1,6 @@
 from copy import deepcopy
 from random import randint
-from typing import cast
+from typing import cast, Type
 
 import pytest
 import torch
@@ -19,7 +19,7 @@ emb_idx = torch.randint(0, 100, [2, 192])
 
 
 @pytest.mark.parametrize("model_cls", [NestedDummy, DummyV2])
-def test_api(model_cls):
+def test_add_remove_activate_update_apis(model_cls):
     adapter_name = "test_adapter"
     model = model_cls()
     org_model = deepcopy(model)
@@ -252,7 +252,13 @@ def assert_models_are_identical(model_a: nn.Module, model_b: nn.Module):
     ), f"Model architectures not match in number of parameters. Got {l1} and {l2}."
 
     for name, module_a in modules_a.items():
-        module_b = model_b.get_submodule(name)
+        try:
+            module_b = model_b.get_submodule(name)
+        except AttributeError:
+            raise AssertionError(
+                f"Model architectures not match in schema. `model_b` does not have module at `{name}`."
+            )
+
         assert (a := type(module_a)) == (
             b := type(module_b)
         ), f"Model architectures not match in module type at fqn={name}. Got{a}!={b}. "
@@ -260,7 +266,7 @@ def assert_models_are_identical(model_a: nn.Module, model_b: nn.Module):
     for name, param_a in params_a.items():
         param_b = model_b.get_parameter(name)
         assert torch.allclose(param_a, param_b, atol=5e-5), (
-            f"Params {name} does not match. "
+            f"Params does not match: `{name}`. "
             f"max_abs = {(param_a-param_b).abs().max()},"
             f" max={max(param_a.max().item(),param_b.max().item())}"
         )
@@ -504,3 +510,163 @@ def test_merge_api(configs: list[LoraConfig], sample: torch.Tensor, model_cls):
 
     assert str(org_model) == str(model)
     debug_model("Processed and cleaned up model", model, True)
+
+
+@torch.no_grad()
+@pytest.mark.parametrize(
+    "configs",
+    [
+        _make_adapter_configs(NUM_CONCURRENT_ADAPTERS)
+        for _ in range(NUM_TEST_CONFIG_LISTS)
+    ],
+)
+@pytest.mark.parametrize(
+    "model_cls",
+    [NestedDummy, DummyV2],
+)
+def test_get_and_load_state_dict_apis(
+    configs: list[LoraConfig], model_cls: type(nn.Module)
+):
+    model: nn.Module = model_cls()
+    model.apply(weights_init)
+    org_model = deepcopy(model)
+
+    adapter_names = [config.adapter_name for config in configs]
+    adapted_fqns: list[str] = []
+
+    # All adapters has zero weights init
+    for config in configs:
+        adapted_fqns = AdapterAPI.add_adapter(
+            model, config, lora_init_method=TorchInitMethod.zeros
+        )
+    adapted_fqns.sort()
+    assert adapted_fqns == AdapterAPI.get_adapted_fqnames(model)
+
+    adt_state_dict = AdapterAPI.get_adapter_state_dict(model)
+    adt_sd_keys = list(adt_state_dict.keys())
+    # logger.debug(
+    #     f"{"\n".join([f"{k}:{v.shape}" for k , v in adt_state_dict.items()  ])}"
+    # )
+
+    # All adapter weights according to the adapted fqn are available in state_dict.
+    key_fmt = "{adt_fqn}.{adt_key}.{adt_name}.{lora_X}.{wnb}"
+    adt_keys = [LoraAdaptedLayer.act_adt_key, LoraAdaptedLayer.non_act_adt_key]
+
+    configs_dict = {config.adapter_name: config for config in configs}
+    assert configs_dict == AdapterAPI.get_adaption_configs(model)
+
+    available_state_keys: list[str] = []
+
+    def _assert_keys(adt_fqn, adt_keys, adt_name, model: nn.Module):
+        check_keys = []
+        for lx in ["lora_A", "lora_B"]:
+            check_keys.append(
+                key_fmt.format(
+                    adt_fqn=adt_fqn,
+                    adt_key=adt_keys,
+                    adt_name=adt_name,
+                    lora_X=lx,
+                    wnb="weight",
+                )
+            )
+            # Only `lora_B` with base_layer is not nn.Embedding can have bias.
+            if (
+                configs_dict[adt_name].bias
+                and lx == "lora_B"
+                and (
+                    not isinstance(
+                        m := model.get_submodule(adt_fqn).base_layer, nn.Embedding
+                    )
+                )
+            ):
+                check_keys.append(
+                    key_fmt.format(
+                        adt_fqn=adt_fqn,
+                        adt_key=adt_keys,
+                        adt_name=adt_name,
+                        lora_X=lx,
+                        wnb="bias",
+                    )
+                )
+                # logger.debug(f"Append `{check_keys[-1]}` to check_keys. m={m},adt_fqn={adt_fqn}")
+
+        assert all(
+            [k in adt_sd_keys for k in check_keys]
+        ), f"\n{check_keys}\n {"\n".join([k for k in adt_sd_keys])}"
+
+        available_state_keys.extend(check_keys)
+
+    for adt_fqn in adapted_fqns:
+        for adt_name in adapter_names:
+            if (
+                key_fmt.format(
+                    adt_fqn=adt_fqn,
+                    adt_key=adt_keys[0],
+                    adt_name=adt_name,
+                    lora_X="lora_A",
+                    wnb="weight",
+                )
+                in adt_sd_keys
+            ):
+                _assert_keys(adt_fqn, adt_keys[0], adt_name, model)
+            elif (
+                key_fmt.format(
+                    adt_fqn=adt_fqn,
+                    adt_key=adt_keys[1],
+                    adt_name=adt_name,
+                    lora_X="lora_A",
+                    wnb="weight",
+                )
+                in adt_sd_keys
+            ):
+                _assert_keys(adt_fqn, adt_keys[1], adt_name, model)
+            else:
+                raise AssertionError(
+                    f"{adt_fqn}.{adt_keys}.{adt_name}.lora_X.wnb not exists in state_dict."
+                )
+    available_state_keys.sort()
+    adt_sd_keys.sort()
+    assert (
+        available_state_keys == adt_sd_keys
+    ), f"{len(available_state_keys)}-{len(adt_sd_keys)}"
+
+    # Add adapters to org_model, but different init method than before (now: ones, before: zeros)
+    model2 = deepcopy(org_model)
+    for config in configs:
+        adapted_fqns = AdapterAPI.add_adapter(
+            model2, config, lora_init_method=TorchInitMethod.ones
+        )
+    adapted_fqns.sort()
+    assert adapted_fqns == AdapterAPI.get_adapted_fqnames(model)
+
+    with pytest.raises(AssertionError, match="Params does not match"):
+        assert_models_are_identical(model, model2)
+
+    # Now identical
+    not_load_keys = AdapterAPI.load_adapter_state_dict(
+        model2, adt_state_dict, strict_load=True
+    )
+    assert not_load_keys == {}, not_load_keys
+    assert_models_are_identical(model, model2)
+
+    # Test fuse activate and non activate
+    model3 = deepcopy(org_model)
+    for config in configs:
+        adapted_fqns = AdapterAPI.add_adapter(
+            model3, config, lora_init_method=TorchInitMethod.ones
+        )
+    with pytest.raises(AssertionError, match="Params does not match"):
+        assert_models_are_identical(model, model3)
+
+    # Activate adapter
+    AdapterAPI.activate_adapter(model3, adapter_names[0], activate=True)
+    with pytest.raises(AssertionError, match="Model architectures not match in schema"):
+        assert_models_are_identical(model, model3)
+
+    # Load, deactivate and now identical
+    not_load_keys = AdapterAPI.load_adapter_state_dict(
+        model3, adt_state_dict, strict_load=True, strict_activation=False  # Default
+    )
+    AdapterAPI.deactivate_adapter(model3)
+    assert not_load_keys == {}, not_load_keys
+    assert_models_are_identical(model, model3)

@@ -51,7 +51,14 @@ def test_lora_linear_single_adapter(config, base_layer_bias, dropout, sample):
     )
     assert isinstance(zero_init_adapter, LoraLinear)
     assert isinstance(ones_init_adapter, LoraLinear)
-
+    
+    # Check for all states, params of Adapter does not contain base_layer.
+    # Brutal force test.
+    for name, param in ones_init_adapter.named_parameters():
+        assert not "base_layer" in name
+    for name, module in ones_init_adapter.named_modules():
+        assert not "base_layer" in name
+    
     # ---Zero init---
     adapted_layer._add_adapters(zero_init_adapter, activate=False)
     adapted_layer.eval()  # IMPORTANT: MUST SWAP TO EVAL AFTER CHANGE ARCHITECTURE.
