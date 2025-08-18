@@ -1,54 +1,69 @@
-from diffusers.models.unets.unet_2d_condition import UNet2DConditionOutput
-from lightning.pytorch.trainer.states import TrainerFn
-from torch import nn, Tensor, IntTensor, FloatTensor
 from enum import StrEnum
+from typing import Any, Self, cast, Optional, Sequence
 
-from torch.utils.data import DataLoader
-from transformers.modeling_outputs import BaseModelOutputWithPooling
-from diffusers.models.autoencoders.vae import DiagonalGaussianDistribution
-from lightning import LightningModule, LightningDataModule, Trainer
+import torch
+import torch.nn.functional as F
 from diffusers import (
     StableDiffusionPipeline,
     AutoencoderKL,
     UNet2DConditionModel,
     DDIMScheduler,
-    DDPMScheduler,
+    DDPMScheduler
 )
-from transformers import (
-    CLIPTokenizer,
-    CLIPTextModel,
-    CLIPTokenizerFast,
-    CLIPImageProcessor,
-)
-from typing import Any, Self, cast, Optional
+from diffusers.models.autoencoders.vae import DiagonalGaussianDistribution
+from diffusers.models.unets.unet_2d_condition import UNet2DConditionOutput
+from diffusers.optimization import get_cosine_schedule_with_warmup
+from lightning import LightningModule
 from lightning.pytorch.utilities.types import (
     STEP_OUTPUT,
     OptimizerLRScheduler,
     OptimizerLRSchedulerConfig,
     LRSchedulerConfigType,
     LRSchedulerTypeUnion,
-    TRAIN_DATALOADERS,
-    EVAL_DATALOADERS,
 )
-from pydantic import BaseModel, ConfigDict, model_validator
-import torch
-import torch.nn.functional as F
-from diffusers.optimization import get_cosine_schedule_with_warmup
 from loguru import logger
+from pydantic import BaseModel, ConfigDict, model_validator
+from torch import Tensor, IntTensor, FloatTensor
+from transformers import (
+    CLIPTokenizer,
+    CLIPTextModel,
+    CLIPTokenizerFast,
+    CLIPImageProcessor,
+)
+from transformers.modeling_outputs import BaseModelOutputWithPooling
 
 
 class SDBatch(BaseModel):
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+    model_config = ConfigDict(arbitrary_types_allowed=True, validate_assignment=True)
 
     input_ids: torch.Tensor
     images: torch.Tensor
 
     @model_validator(mode="after")
     def check_size(self) -> Self:
-        assert self.input_ids.size(0) == self.images.size(0)
-        assert self.images.size(1) == 3
+        input_ids = self.input_ids
+        images = self.images
+        assert input_ids.size(0) == images.size(0)
+
+        assert not torch.is_floating_point(input_ids)
+
+
+        assert torch.is_floating_point(images)
+        assert images.size(1) == 3
+        assert len(images.shape) == 4
+        assert (self.images.max()<=1.0).all() and (self.images.min()>=-1.0).all()
+
+
         return self
 
+    def to(self, device = None, dtype=None, **kwargs)->Self:
+        return self.__class__(
+            input_ids = self.input_ids.to(device = device, **kwargs),
+            images = self.images.to(device=device, dtype=dtype, **kwargs),
+        )
+
+    def __len__(self)->int:
+        return self.images.size(0)
 
 class PredictionType(StrEnum):
     EPSILON = "epsilon"
@@ -56,11 +71,12 @@ class PredictionType(StrEnum):
     V_PREDICTION = "v_prediction"
 
 
-class MonitorKeys(StrEnum):
+class MonitorKey(StrEnum):
     TRAIN_LOSS = "train_loss"
     VAL_LOSS = "val_loss"
+    LRS = "lrs"
 
-
+# noinspection PyUnresolvedReferences
 class StableDiffusionModule(LightningModule):
     """
     Attributes:
@@ -133,15 +149,10 @@ class StableDiffusionModule(LightningModule):
         self.scheduler: DDIMScheduler | DDPMScheduler = pipeline.scheduler
         self.pipeline = pipeline
 
-        self.addition_kwargs = addition_kwargs
+        self.vae.requires_grad_(False)
+        self.text_encoder.requires_grad_(False)
 
-        self._hook_storage: dict[Any, Any] = {}
-        """
-        Simple storage to store output of any hook methods. The logic of store, compose, clear,... depend on hook.
-        Hook must take care about the collision.
-        
-        Example usecase: Store step loss for each batch, then calculate and log mean loss, then clear the storage.
-        """
+        self.addition_kwargs = addition_kwargs
 
     @property
     def latents_values_scaling(self) -> float:
@@ -152,6 +163,7 @@ class StableDiffusionModule(LightningModule):
     def latents_spatial_reduced_ratio(self) -> int:
         """The reduced ratio"""
         return 2 ** (len(self.vae.config.block_out_channels) - 1)
+
 
     def vae_encode(self, images: torch.Tensor) -> torch.Tensor:
         latent_dist: DiagonalGaussianDistribution = self.vae.encode(images).latent_dist
@@ -167,22 +179,31 @@ class StableDiffusionModule(LightningModule):
         reduction = self.addition_kwargs.get("reduction", "mean")
         return F.mse_loss(prediction, target, reduction=reduction)
 
+    def create_timesteps(self, size: Sequence[int]|int) -> IntTensor:
+        size = size if isinstance(size, Sequence) else [size]
+        timesteps = torch.randint(
+            0,
+            self.scheduler.config.num_train_timesteps,
+            size,
+            device=self.device,
+            dtype=torch.int32,
+        )
+        return cast(IntTensor,timesteps)
+
+    def create_noises(self, size: Sequence[int]):
+        return torch.randn(size, dtype=self.dtype, device=self.device)
+
+
     def forward_batch_loss(
         self, batch: SDBatch, batch_index: int, **kwargs
     ) -> torch.Tensor:
-        latents = self.vae_encode(images := batch.images)
-        noises = torch.rand_like(latents)
-        timesteps = cast(
-            IntTensor,
-            torch.randint(
-                0, self.scheduler.config.num_train_timesteps, (latents.size(0),)
-            ),
-        )
+
+        latents = self.vae_encode(batch.images)
+        noises = self.create_noises(latents.shape)
+        timesteps = self.create_timesteps(latents.shape[0])
         noisy_latents = self.scheduler.add_noise(latents, noises, timesteps)
 
-        text_encoder_output: BaseModelOutputWithPooling = self.text_encoder(
-            input_ids := batch.input_ids
-        )
+        text_encoder_output: BaseModelOutputWithPooling = self.text_encoder(batch.input_ids)
         text_embeddings = text_encoder_output.last_hidden_state
 
         unet_output: UNet2DConditionOutput = self.unet(
@@ -195,7 +216,7 @@ class StableDiffusionModule(LightningModule):
         ) == PredictionType.EPSILON:
             target = noises
         elif pred_type == PredictionType.SAMPLE:
-            target = images
+            target = latents
         elif pred_type == PredictionType.V_PREDICTION:
             target = self.scheduler.get_velocity(latents, noises, timesteps)
         else:
@@ -204,64 +225,107 @@ class StableDiffusionModule(LightningModule):
         loss = self.loss_fn(model_pred, target)
         return loss
 
+    def get_lrs(self)->dict:
+        optims = self.optimizers()
+        if not isinstance(optims, Sequence):
+            optims = [optims]
+        lrs = {}
+        for i, optim in enumerate(optims):
+            for j, pg in enumerate(optim.optimizer.param_groups):
+                lrs[f"optim_{i}-pg_{j}_lr"] = pg["lr"]
+        return lrs
+
+    # Lightning Hooks
+    def transfer_batch_to_device(self, batch: SDBatch, device: torch.device, dataloader_idx: int) -> SDBatch:
+        return batch.to(device=device, dtype = self.dtype)
+
+    def _log_step(self, key: MonitorKey, value: Any) -> None:
+        self.log(
+            key, value,
+            prog_bar=True,
+            logger=False,
+            on_step = True ,
+            on_epoch=False,
+        )
+
+    def _log_epoch(self, key: MonitorKey, value: Any, **kwargs) -> None:
+        self.log(
+            key, value,
+            prog_bar=False,
+            logger=True,
+            on_step = False ,
+            on_epoch=True,
+            **kwargs
+        )
+
+
     def training_step(
         self, batch: SDBatch, batch_index: int, **kwargs: Any
     ) -> STEP_OUTPUT:
         loss = self.forward_batch_loss(batch, batch_index, **kwargs)
+        self._log_step(MonitorKey.TRAIN_LOSS+f"_step", loss)
+        self._log_epoch(MonitorKey.TRAIN_LOSS, loss, batch_size=len(batch))
         return loss
 
-    def on_train_batch_end(
-        self, outputs: STEP_OUTPUT, batch: Any, batch_idx: int
-    ) -> None:
-        assert isinstance(outputs, Tensor) and len(outputs.shape) == 0
-        loss_k = MonitorKeys.TRAIN_LOSS
-        outputs = outputs[None]
+    # def on_train_batch_end(
+    #     self, outputs: STEP_OUTPUT, batch: SDBatch, batch_index: int
+    # ) -> None:
+    #     # outputs = outputs["loss"].cpu() # dont know why this is a dict instead of a tensor, the `on_validation_batch_end` still receive tensor.
+    #     # self._store_loss(MonitorKeys.TRAIN_LOSS, outputs)
+    #     # self.log("train_loss", outputs, logger=False,prog_bar=True)
+    #     self.log_dict(
+    #         self.get_lrs(),
+    #         on_step=True,
+    #         on_epoch=False,
+    #         prog_bar=True,
+    #         logger= False
+    #     ) # Stream lr on progress bar only.
 
-        if (losses := self._hook_storage.get(loss_k)) is None:
-            self._hook_storage[loss_k] = outputs
-        else:
-            assert isinstance(losses, Tensor) and len(cast(Tensor, losses).shape) == 1
-            self._hook_storage[loss_k] = torch.cat([losses, outputs], dim=0)
+    # def on_train_epoch_end(self) -> None:
+    #     """
+    #     Note that this hook will be called after `on_validation_epoch_end` or `on_validation_end`.
+    #     So that can be called to process both train and val at once.
+    #     """
+    #     # loss_dict = dict(
+    #     #     train_loss = self._hook_storage.pop(MonitorKeys.TRAIN_LOSS),
+    #     #     val_loss = self._hook_storage.pop(MonitorKeys.VAL_LOSS),
+    #     #     **self.get_lrs()
+    #     # )
+    #     self.log_dict(
+    #         self.get_lrs(),
+    #         logger=False, prog_bar=False, sync_dist=True)
+    #     # logger.debug(f"Logged_metric epoch end: {self.trainer.logged_metrics}")
+    #     # logger.debug(f"callback_metrics epoch end: {self.trainer.callback_metrics}")
 
-    def on_train_epoch_end(self) -> None:
-        """
-        Note that this hook will be called after `on_validation_epoch_end` or `on_validation_end`.
-        So that can be called to process both train and val at once.
-        """
-        loss_key = MonitorKeys.TRAIN_LOSS
-        mean_loss = cast(Tensor, self._hook_storage[loss_key]).mean().item()
-        self.log(loss_key, mean_loss, logger=True, prog_bar=True)
 
     def validation_step(
         self, batch: SDBatch, batch_index: int, **kwargs: Any
     ) -> STEP_OUTPUT:
         loss = self.forward_batch_loss(batch, batch_index, **kwargs)
+        self._log_step(MonitorKey.VAL_LOSS+f"_step", loss)
+        self._log_epoch(MonitorKey.VAL_LOSS, loss, batch_size=len(batch), sync_dist=True)
         return loss
 
-    def on_validation_batch_end(
-        self, outputs: STEP_OUTPUT, batch: Any, batch_idx: int, dataloader_idx: int = 0
-    ) -> None:
-        """In the hook loop, this method call directly after `validation_step`, so you can
-        just implement everything in the ` validation_step ` method.
-        See Also: https://lightning.ai/docs/pytorch/stable/common/lightning_module.html#hooks
-        """
-        # Copy of `on_train_batch_end`. Don't make it abstract because maybe two methods have different process.
+    # def on_validation_batch_end(
+    #     self, outputs: STEP_OUTPUT, batch: Any, batch_idx: int, dataloader_idx: int = 0
+    # ) -> None:
+    #     """In the hook loop, this method call directly after `validation_step`, so you can
+    #     just implement everything in the ` validation_step ` method. Separate now just by personal.
+    #     See Also: https://lightning.ai/docs/pytorch/stable/common/lightning_module.html#hooks
+    #     """
+    #     outputs = outputs.cpu()
+    #     self.log("val_loss", outputs)
+    #     # self._store_loss(MonitorKeys.VAL_LOSS, outputs)
 
-        assert isinstance(outputs, Tensor) and len(outputs.shape) == 0
-        loss_k = MonitorKeys.VAL_LOSS
-        outputs = outputs[None]
-
-        if (losses := self._hook_storage.get(loss_k)) is None:
-            self._hook_storage[loss_k] = outputs
-        else:
-            assert isinstance(losses, Tensor) and len(cast(Tensor, losses).shape) == 1
-            self._hook_storage[loss_k] = torch.cat([losses, outputs], dim=0)
-
-    def on_validation_epoch_end(self) -> None:
-        loss_key = MonitorKeys.VAL_LOSS
-        mean_loss = cast(Tensor, self._hook_storage[loss_key]).mean().item()
-        self.log(loss_key, mean_loss, logger=True, prog_bar=True)
-
+    # def on_validation_epoch_end(self) -> None:
+    #     """
+    #     This step is performed in `on_train_epoch_end`.
+    #     """
+    #     # loss_key = MonitorKeys.VAL_LOSS
+    #     # mean_loss = cast(Tensor, self._hook_storage[loss_key]).mean().item()
+    #     # self.log(loss_key, mean_loss, logger=True, prog_bar=True, sync_dist=True)
+    #     pass
+    #
     def configure_optimizers(self) -> OptimizerLRScheduler:
         """
         This method only be called by Trainer, and Trainer will assign itself into this.
@@ -274,8 +338,10 @@ class StableDiffusionModule(LightningModule):
 
         num_train_steps = self.trainer.estimated_stepping_batches
         num_warmup_steps = int(0.02 * num_train_steps)
-        current_step = self.trainer.global_step
+        current_step = self.global_step-1
         step_freq = 1
+
+        logger.debug(f"Total train steps={num_train_steps},current step={current_step}.")
 
         lr_scheduler = get_cosine_schedule_with_warmup(
             optimizer,
@@ -300,53 +366,3 @@ class StableDiffusionModule(LightningModule):
         )
 
 
-class SDTrainer(Trainer):
-    pass
-
-
-class StableDiffusionDataModule(LightningDataModule):
-    def prepare_data(self) -> None:
-        logger.debug("Preparing data...")
-
-    def setup(self, stage: TrainerFn = TrainerFn.FITTING) -> None:
-        logger.debug("Setting up data...")
-
-    def train_dataloader(self) -> TRAIN_DATALOADERS:
-        dl = DataLoader(
-            self.train_ds,
-            batch_size=self.config.train_dl_cfg.batchsize,
-            num_workers=self.config.train_dl_cfg.num_workers,
-            collate_fn=self.collate_fn,
-        )
-        return dl
-
-    def val_dataloader(self) -> EVAL_DATALOADERS:
-        dl = DataLoader(
-            self.val_ds,
-            batch_size=self.config.val_dl_cfg.batchsize,
-            num_workers=self.config.val_dl_cfg.num_workers,
-            collate_fn=self.collate_fn,
-        )
-        return dl
-
-    def test_dataloader(self) -> EVAL_DATALOADERS:
-        dl = DataLoader(
-            self.val_ds,
-            batch_size=self.config.test_dl_cfg.batchsize,
-            num_workers=self.config.test_dl_cfg.num_workers,
-            collate_fn=self.collate_fn,
-        )
-        return dl
-
-    def predict_dataloader(self) -> EVAL_DATALOADERS:
-        dl = DataLoader(
-            self.val_ds,
-            batch_size=self.config.predict_dl_cfg.batchsize,
-            num_workers=self.config.predict_dl_cfg.num_workers,
-            collate_fn=self.collate_fn,
-        )
-        return dl
-
-
-def sd_train(trainer: SDTrainer = None):
-    pass

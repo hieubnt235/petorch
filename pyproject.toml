@@ -1,3 +1,8 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+
 [project]
 name = "petorch"
 version = "0.1.0"
@@ -6,7 +11,9 @@ readme = "README.md"
 authors = [
     { name = "hieu", email = "hieu.buinguyen2352001@gmail.com" }
 ]
+
 requires-python = ">=3.13"
+
 dependencies = [
     "accelerate>=1.8.1",
     "bitsandbytes>=0.46.1",
@@ -26,6 +33,7 @@ dependencies = [
     "setuptools>=80.9.0",
     "torch>=2.7.1",
     "torchao>=0.12.0",
+    "torchinfo>=1.8.0",
     "torchmetrics[image]>=1.7.4",
     "torchvision>=0.22.1",
     "transformers>=4.53.2",
@@ -34,17 +42,13 @@ dependencies = [
 ]
 
 
-[build-system]
-requires = ["setuptools>=61"]
-build-backend = "setuptools.build_meta"
 
-#[tool.setuptools.packages.find]
-#where = ["src"]
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [tool.uv.sources]
 torch = { index = "pytorch-cu128" }
 torchvision = { index = "pytorch-cu128" }
-#ds-utils = { git = "https://github.com/hieubnt235/ds-utils.git" }
 
 
 [[tool.uv.index]]
