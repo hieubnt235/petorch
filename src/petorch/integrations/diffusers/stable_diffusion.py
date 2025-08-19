@@ -1,8 +1,7 @@
 from enum import StrEnum
-from typing import Any, Self, cast, Optional, Sequence
+from typing import Any, Self, cast, Sequence
 
 import torch
-import torch.nn.functional as F
 from diffusers import (
     StableDiffusionPipeline,
     AutoencoderKL,
@@ -19,11 +18,12 @@ from lightning.pytorch.utilities.types import (
     OptimizerLRScheduler,
     OptimizerLRSchedulerConfig,
     LRSchedulerConfigType,
-    LRSchedulerTypeUnion,
 )
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, model_validator
 from torch import Tensor, IntTensor, FloatTensor
+from torch import nn
+from torchmetrics import MeanMetric, Metric
 from transformers import (
     CLIPTokenizer,
     CLIPTextModel,
@@ -57,8 +57,19 @@ class SDBatch(BaseModel):
         return self
 
     def to(self, device = None, dtype=None, **kwargs)->Self:
+        """
+
+        Args:
+            device:
+            dtype:
+            **kwargs:
+
+        Returns:
+
+        """
+        # For not make a mistake in assignment checking (ex: batch sizes must be the same). I recreate new instance instead.
         return self.__class__(
-            input_ids = self.input_ids.to(device = device, **kwargs),
+            input_ids = self.input_ids.to(device = device, **kwargs), # This must always int64.
             images = self.images.to(device=device, dtype=dtype, **kwargs),
         )
 
@@ -71,10 +82,9 @@ class PredictionType(StrEnum):
     V_PREDICTION = "v_prediction"
 
 
-class MonitorKey(StrEnum):
+class MetricKey(StrEnum):
     TRAIN_LOSS = "train_loss"
     VAL_LOSS = "val_loss"
-    LRS = "lrs"
 
 # noinspection PyUnresolvedReferences
 class StableDiffusionModule(LightningModule):
@@ -84,7 +94,7 @@ class StableDiffusionModule(LightningModule):
         vae:
         text_encoder:
         tokenizer:
-         scheduler:
+        scheduler:
 
     You can override all methods defined on this class to customize for your case.
     """
@@ -104,6 +114,20 @@ class StableDiffusionModule(LightningModule):
         feature_extractor: CLIPImageProcessor | None = None,
         **addition_kwargs,
     ):
+        """
+
+        Args:
+            pipeline:
+            model_id:
+            vae:
+            unet:
+            text_encoder:
+            tokenizer:
+            scheduler:
+            feature_extractor:
+            **addition_kwargs: Such as `metric_compute_on_cpu` or `train_loss_compute_on_cpu`.
+
+        """
         super().__init__()
         kwargs = dict(
             unet=unet,
@@ -114,7 +138,10 @@ class StableDiffusionModule(LightningModule):
             model_id=model_id,
             feature_extractor=feature_extractor,
         )
-        # Delete all None values.
+
+        # 1. Preprocess args
+
+        ## Delete all None values.
         del_k = []
         for k, v in kwargs.items():
             if v is None:
@@ -142,6 +169,7 @@ class StableDiffusionModule(LightningModule):
                     image_encoder=None,
                 )
 
+        # 2. Components
         self.unet: UNet2DConditionModel = pipeline.unet
         self.vae: AutoencoderKL = pipeline.vae
         self.text_encoder: CLIPTextModel = pipeline.text_encoder
@@ -150,8 +178,31 @@ class StableDiffusionModule(LightningModule):
         self.pipeline = pipeline
 
         self.vae.requires_grad_(False)
-        self.text_encoder.requires_grad_(False)
+        # self.text_encoder.requires_grad_(False)
 
+        # 3. Loss fn
+        self.loss_fn = nn.MSELoss(reduction="mean")
+
+        # 4. Metrics
+        metric_kwargs:dict[MetricKey,dict] = {
+            MetricKey.TRAIN_LOSS: {},
+            MetricKey.VAL_LOSS: {},
+        }
+        for k, v in addition_kwargs.items():
+            if (prefix:=k.split("_")[0]) in MetricKey:
+                metric_kwargs[mkey].update({k.removeprefix(prefix+"_"): v})
+            elif k.startswith("metric_"):
+                for kw in metric_kwargs.values():
+                    kw.update({k.removeprefix("metric_"): v})
+
+        self.metrics = nn.ModuleDict(
+            {
+                MetricKey.TRAIN_LOSS: MeanMetric(**metric_kwargs[MetricKey.TRAIN_LOSS]),
+                MetricKey.VAL_LOSS: MeanMetric(**metric_kwargs[MetricKey.VAL_LOSS]),
+            }
+        )
+
+        # 5. Additions
         self.addition_kwargs = addition_kwargs
 
     @property
@@ -164,7 +215,6 @@ class StableDiffusionModule(LightningModule):
         """The reduced ratio"""
         return 2 ** (len(self.vae.config.block_out_channels) - 1)
 
-
     def vae_encode(self, images: torch.Tensor) -> torch.Tensor:
         latent_dist: DiagonalGaussianDistribution = self.vae.encode(images).latent_dist
         latents = latent_dist.sample() * self.latents_values_scaling
@@ -174,10 +224,6 @@ class StableDiffusionModule(LightningModule):
         return self.vae.decode(
             cast(FloatTensor, latents / self.latents_values_scaling)
         ).sample
-
-    def loss_fn(self, prediction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        reduction = self.addition_kwargs.get("reduction", "mean")
-        return F.mse_loss(prediction, target, reduction=reduction)
 
     def create_timesteps(self, size: Sequence[int]|int) -> IntTensor:
         size = size if isinstance(size, Sequence) else [size]
@@ -192,7 +238,6 @@ class StableDiffusionModule(LightningModule):
 
     def create_noises(self, size: Sequence[int]):
         return torch.randn(size, dtype=self.dtype, device=self.device)
-
 
     def forward_batch_loss(
         self, batch: SDBatch, batch_index: int, **kwargs
@@ -225,7 +270,11 @@ class StableDiffusionModule(LightningModule):
         loss = self.loss_fn(model_pred, target)
         return loss
 
-    def get_lrs(self)->dict:
+    def get_metric(self, key: MetricKey) -> Metric:
+        return cast(Metric,self.metrics[key])
+
+    def get_lrs(self)->dict[str,Any]:
+        # noinspection SpellCheckingInspection
         optims = self.optimizers()
         if not isinstance(optims, Sequence):
             optims = [optims]
@@ -239,18 +288,20 @@ class StableDiffusionModule(LightningModule):
     def transfer_batch_to_device(self, batch: SDBatch, device: torch.device, dataloader_idx: int) -> SDBatch:
         return batch.to(device=device, dtype = self.dtype)
 
-    def _log_step(self, key: MonitorKey, value: Any) -> None:
-        self.log(
-            key, value,
+    def _log_step(self, dictionary:dict[str|StrEnum, Any], **kwargs) -> None:
+        dictionary = {f"{k}_step":v for k, v in dictionary.items()}
+        self.log_dict(
+            dictionary,
             prog_bar=True,
             logger=False,
             on_step = True ,
             on_epoch=False,
+            **kwargs
         )
 
-    def _log_epoch(self, key: MonitorKey, value: Any, **kwargs) -> None:
-        self.log(
-            key, value,
+    def _log_epoch(self,dictionary:dict[str|StrEnum, Any], **kwargs) -> None:
+        self.log_dict(
+            dictionary,
             prog_bar=False,
             logger=True,
             on_step = False ,
@@ -258,74 +309,64 @@ class StableDiffusionModule(LightningModule):
             **kwargs
         )
 
-
     def training_step(
         self, batch: SDBatch, batch_index: int, **kwargs: Any
     ) -> STEP_OUTPUT:
         loss = self.forward_batch_loss(batch, batch_index, **kwargs)
-        self._log_step(MonitorKey.TRAIN_LOSS+f"_step", loss)
-        self._log_epoch(MonitorKey.TRAIN_LOSS, loss, batch_size=len(batch))
+
+        # Stream to progress bar only.
+        mkey = MetricKey.TRAIN_LOSS
+        self._log_step(
+            {
+                mkey: loss,
+                **self.get_lrs()
+            }
+        )
+        # Update metric for log epoch loss.
+        # IMPORTANCE: WHEN USE Metric instance, the batch_size in self.log is not use.
+        # If you pass only value, make sure batch_size in self.log =1.
+        self.get_metric(mkey).update(loss, len(batch))
         return loss
 
-    # def on_train_batch_end(
-    #     self, outputs: STEP_OUTPUT, batch: SDBatch, batch_index: int
-    # ) -> None:
-    #     # outputs = outputs["loss"].cpu() # dont know why this is a dict instead of a tensor, the `on_validation_batch_end` still receive tensor.
-    #     # self._store_loss(MonitorKeys.TRAIN_LOSS, outputs)
-    #     # self.log("train_loss", outputs, logger=False,prog_bar=True)
-    #     self.log_dict(
-    #         self.get_lrs(),
-    #         on_step=True,
-    #         on_epoch=False,
-    #         prog_bar=True,
-    #         logger= False
-    #     ) # Stream lr on progress bar only.
-
-    # def on_train_epoch_end(self) -> None:
-    #     """
-    #     Note that this hook will be called after `on_validation_epoch_end` or `on_validation_end`.
-    #     So that can be called to process both train and val at once.
-    #     """
-    #     # loss_dict = dict(
-    #     #     train_loss = self._hook_storage.pop(MonitorKeys.TRAIN_LOSS),
-    #     #     val_loss = self._hook_storage.pop(MonitorKeys.VAL_LOSS),
-    #     #     **self.get_lrs()
-    #     # )
-    #     self.log_dict(
-    #         self.get_lrs(),
-    #         logger=False, prog_bar=False, sync_dist=True)
-    #     # logger.debug(f"Logged_metric epoch end: {self.trainer.logged_metrics}")
-    #     # logger.debug(f"callback_metrics epoch end: {self.trainer.callback_metrics}")
-
+    def on_train_epoch_end(self) -> None:
+        """
+        Note that this hook will be called after `on_validation_epoch_end` or `on_validation_end`.
+        So that can be called to process both train and val at once.
+        """
+        train_metric = self.get_metric(MetricKey.TRAIN_LOSS)
+        val_metric = self.get_metric(MetricKey.VAL_LOSS)
+        self._log_epoch(
+            {
+                MetricKey.TRAIN_LOSS: train_metric.compute(),
+                MetricKey.VAL_LOSS: val_metric.compute(),
+                **self.get_lrs()
+            },
+            sync_dist=True
+        )
+        train_metric.reset()
+        val_metric.reset()
 
     def validation_step(
         self, batch: SDBatch, batch_index: int, **kwargs: Any
     ) -> STEP_OUTPUT:
         loss = self.forward_batch_loss(batch, batch_index, **kwargs)
-        self._log_step(MonitorKey.VAL_LOSS+f"_step", loss)
-        self._log_epoch(MonitorKey.VAL_LOSS, loss, batch_size=len(batch), sync_dist=True)
+        self.get_metric(MetricKey.VAL_LOSS).update(loss, len(batch))
         return loss
 
-    # def on_validation_batch_end(
-    #     self, outputs: STEP_OUTPUT, batch: Any, batch_idx: int, dataloader_idx: int = 0
-    # ) -> None:
-    #     """In the hook loop, this method call directly after `validation_step`, so you can
-    #     just implement everything in the ` validation_step ` method. Separate now just by personal.
-    #     See Also: https://lightning.ai/docs/pytorch/stable/common/lightning_module.html#hooks
-    #     """
-    #     outputs = outputs.cpu()
-    #     self.log("val_loss", outputs)
-    #     # self._store_loss(MonitorKeys.VAL_LOSS, outputs)
+    def on_validation_batch_end(
+        self, outputs: STEP_OUTPUT, batch: Any, batch_idx: int, dataloader_idx: int = 0
+    ) -> None:
+        """In the hook loop, this method call directly after `validation_step`, so you can
+        just implement everything in the ` validation_step ` method. Redefine here just to notices.
+        See Also: https://lightning.ai/docs/pytorch/stable/common/lightning_module.html#hooks
+        """
+        pass
 
-    # def on_validation_epoch_end(self) -> None:
-    #     """
-    #     This step is performed in `on_train_epoch_end`.
-    #     """
-    #     # loss_key = MonitorKeys.VAL_LOSS
-    #     # mean_loss = cast(Tensor, self._hook_storage[loss_key]).mean().item()
-    #     # self.log(loss_key, mean_loss, logger=True, prog_bar=True, sync_dist=True)
-    #     pass
-    #
+    def on_validation_epoch_end(self) -> None:
+        """This step is performed in `on_train_epoch_end`.Redefine here just to notices."""
+        pass
+
+
     def configure_optimizers(self) -> OptimizerLRScheduler:
         """
         This method only be called by Trainer, and Trainer will assign itself into this.
@@ -364,5 +405,3 @@ class StableDiffusionModule(LightningModule):
                 # strict=True # Must have monitor value
             ),
         )
-
-

@@ -1,7 +1,7 @@
 from collections.abc import Callable
 from typing import Unpack
 
-from pydantic import PositiveInt, NonNegativeFloat, PositiveFloat
+from pydantic import PositiveInt, NonNegativeFloat, PositiveFloat, Field
 from torch import nn
 
 from petorch.adapter import (
@@ -29,6 +29,8 @@ MODULE_ADAPTER_CLASSES_MAP = {
     nn.Module: None,
 }
 
+def _all_fqn(a:str)->bool:
+    return True
 
 class LoraConfig(BaseModelAdaptionConfig):
     rank: PositiveInt = 8
@@ -36,6 +38,8 @@ class LoraConfig(BaseModelAdaptionConfig):
     dropout: NonNegativeFloat = 0.1
     bias: bool = False
     scale: PositiveFloat = 1.0
+
+    fqname_filter: Callable[[str], bool] = Field(default=_all_fqn)
 
     def dispatch_adapter(
         self,
@@ -48,6 +52,9 @@ class LoraConfig(BaseModelAdaptionConfig):
         **kwargs: Unpack[ValidateConfigKwargs]
     ) -> BaseLoraAdapter | None:
         adapter_cls = MODULE_ADAPTER_CLASSES_MAP.get(type(base_layer), None)
+
+        if not self.fqname_filter(fqname):
+            return None
 
         if adapter_cls is not None:
             assert issubclass(adapter_cls, BaseLoraAdapter)

@@ -347,7 +347,7 @@ class BaseAdaptedLayer(nn.Module, ABC):
                     del_keys.append(key)
 
         for key in del_keys:
-            logger.debug(f"del_key: `{key}`")
+            # logger.debug(f"del_key: `{key}`")
             del state_dict[key]
 
         return state_dict
@@ -460,7 +460,7 @@ class BaseModelAdaptionConfig(BaseModel, ABC):
     2. Contain dispatch logic for construct LayerAdapter and replace it the base_layer .
     """
 
-    model_config = ConfigDict(validate_assignment=True, validate_default=True)
+    model_config = ConfigDict(validate_assignment=True, validate_default=True, arbitrary_types_allowed=True)
     adapter_name: str = Field("default")
 
     @abstractmethod
