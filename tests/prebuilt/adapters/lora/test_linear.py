@@ -169,7 +169,7 @@ def _make_adapter_configs(num_current_adapters: int) -> list[LoraConfig]:
 def test_lora_linear_multi_adapters(sample, configs):
     base_layer = nn.Linear(*linear_size, bias=True)
     adapters = [
-        cast(LoraConfig, config).dispatch_adapter(fqname, base_layer)
+        cast(LoraConfig, config).dispatch_adapter(fqname, base_layer, lora_init_method=TorchInitMethod.kaiming_normal)
         for config in configs
     ]
     assert None not in adapters
@@ -203,6 +203,7 @@ def test_lora_linear_multi_adapters(sample, configs):
     )
 
     activated_output = adapted_layer(sample)
+    
     assert not torch.allclose(activated_output, output)
     assert torch.allclose(
         adapted_layer.base_layer(sample), output
@@ -231,7 +232,7 @@ def test_lora_linear_multi_adapters(sample, configs):
         o := adapted_layer(sample), activated_output, atol=1e-5
     ), f"max_abs = {(activated_output-o).abs().max()}"
 
-    # But only base does NOT equal
+    # But base-oly does NOT equal
     assert not torch.allclose(
         o := adapted_layer.base_layer(sample), activated_output
     ), f"max_abs = {(activated_output-o).abs().max()}"

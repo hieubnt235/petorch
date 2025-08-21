@@ -37,7 +37,7 @@ def test_add_remove_activate_update_apis(model_cls):
             target_fqn.append(name)
     target_fqn.sort()
 
-    fqn = AdapterAPI.add_adapter(model, config)
+    fqn = AdapterAPI.add_adapter(model, config, lora_init_method=TorchInitMethod.kaiming_uniform)
     fqn.sort()
     assert fqn == target_fqn
     assert AdapterAPI.get_adapter_names(model)[0] == adapter_name

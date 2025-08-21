@@ -67,7 +67,7 @@ class LoraConfig(BaseModelAdaptionConfig):
             if lora_b_init_method:
                 lora_b_init_method(adapter.lora_B.weight)
                 if adapter.is_bias:
-                    lora_b_init_method(adapter.lora_B.bias)
+                    nn.init.zeros_(adapter.lora_B.bias)
             return adapter
 
         return None

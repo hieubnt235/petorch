@@ -173,7 +173,7 @@ def test_lora_conv_multi_adapters(base_layer, configs):
     sample = torch.rand([NUM_TEST_SAMPLES, conv_args[0]] + [16] * (kernel_dim - 2))
 
     adapters = [
-        cast(LoraConfig, config).dispatch_adapter(fqname, base_layer)
+        cast(LoraConfig, config).dispatch_adapter(fqname, base_layer, lora_init_method=TorchInitMethod.kaiming_uniform)
         for config in configs
     ]
     assert None not in adapters
