@@ -1,4 +1,3 @@
-import sys
 import warnings
 from pathlib import Path
 from types import MethodType
@@ -11,7 +10,6 @@ import safetensors.torch as st
 import torch
 import torchvision.transforms.v2 as transforms
 from datasets import load_dataset, Dataset as ArrDataset
-from jedi.api import project
 from lightning import LightningDataModule, Trainer, Callback
 from lightning.pytorch.callbacks import ModelCheckpoint, TQDMProgressBar, ModelSummary
 from lightning.pytorch.loggers import CSVLogger, WandbLogger, Logger
@@ -409,41 +407,50 @@ def get_trainer(
     )
     return trainer
 
+def get_sd_module(adt_config: LoraConfig=None, adt_ckpt:str=None, **module_kwargs)->StableDiffusionModule:
+    logger.debug(f"Load model from: {model_id}")
+    module = StableDiffusionModule(model_id=model_id,**module_kwargs)
+    if adt_config:
+        logger.debug(f"Add adapter from config: {adt_config}")
+        module.requires_grad_(False)
+        AdapterAPI.add_adapter(module, config, activate=True)
+        if adt_ckpt:
+            logger.debug(f"Load Adapter checkpoint from: {adt_ckpt}")
+            adt_state_dict = st.load_file(adt_ckpt)
+            AdapterAPI.load_adapter_state_dict(module,adt_state_dict,strict_load=True)
+    n, t = 0, 0
+    for name, param in module.named_parameters():
+        t += param.numel()
+        if param.requires_grad:
+            assert "lora" in name
+            n += param.numel()
+    logger.debug(f"Trainable params={n:,} | Total params={t:,} | Ratio={n / t:.4f}")
+    return module
 
 if __name__ == "__main__":
+    storage_path = "/home/a3ilab01/h-ws/petorch/storage/"
+    adt_ckpt = None
 
     # 1. Prepare model
-    module = StableDiffusionModule(model_id=model_id)
-    module.requires_grad_(False)
     config = LoraConfig(
         adapter_name="default", rank=8, alpha=16, fqname_filter=lambda _n: "unet" in _n
     )
-    AdapterAPI.add_adapter(module, config, activate=True)
+    module = get_sd_module(config, adt_ckpt)
 
-    # 2. Make sure everything as expected.
-    n,t  = 0,0
-    for name, param in module.named_parameters():
-        t+=param.numel()
-        if param.requires_grad:
-            assert "lora" in name
-            n+=param.numel()
-    logger.debug(f"Trainable params/Total params/Ratio: {n:,}/{t:,}/{n/t:.4f}")
-
-    # 3. Prepare data
+    # 2. Prepare data
     data_module = NarutoBlipDataModule(
         batch_size=4,
         num_workers=32,
         train_ratio=0.8
     )
 
-    # 4. Train
+    # 3. Prepare trainer
     wandb_logger = WandbLogger(
         name = "train_sd_2_1_lora",
         project=PROJECT_NAME,
         # log_model=True,
         save_dir=cast(str,None)
     )
-    storage_path = "/home/a3ilab01/h-ws/petorch/storage/"
     pl_trainer = get_trainer(
         storage_path+PROJECT_NAME,
         accumulate_grad_batches=4,

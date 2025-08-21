@@ -1,13 +1,14 @@
 from enum import StrEnum
-from typing import Any, Self, cast, Sequence
-
+from typing import Any, Self, cast, Sequence, Callable, Iterator, Literal
+from lightning.pytorch.trainer.states import TrainerFn
+from torch.optim import Optimizer
 import torch
 from diffusers import (
     StableDiffusionPipeline,
     AutoencoderKL,
     UNet2DConditionModel,
     DDIMScheduler,
-    DDPMScheduler
+    DDPMScheduler,
 )
 from diffusers.models.autoencoders.vae import DiagonalGaussianDistribution
 from diffusers.models.unets.unet_2d_condition import UNet2DConditionOutput
@@ -47,16 +48,14 @@ class SDBatch(BaseModel):
 
         assert not torch.is_floating_point(input_ids)
 
-
         assert torch.is_floating_point(images)
         assert images.size(1) == 3
         assert len(images.shape) == 4
-        assert (self.images.max()<=1.0).all() and (self.images.min()>=-1.0).all()
-
+        assert (self.images.max() <= 1.0).all() and (self.images.min() >= -1.0).all()
 
         return self
 
-    def to(self, device = None, dtype=None, **kwargs)->Self:
+    def to(self, device=None, dtype=None, **kwargs) -> Self:
         """
 
         Args:
@@ -69,12 +68,15 @@ class SDBatch(BaseModel):
         """
         # For not make a mistake in assignment checking (ex: batch sizes must be the same). I recreate new instance instead.
         return self.__class__(
-            input_ids = self.input_ids.to(device = device, **kwargs), # This must always int64.
-            images = self.images.to(device=device, dtype=dtype, **kwargs),
+            input_ids=self.input_ids.to(
+                device=device, **kwargs
+            ),  # This must always int64.
+            images=self.images.to(device=device, dtype=dtype, **kwargs),
         )
 
-    def __len__(self)->int:
+    def __len__(self) -> int:
         return self.images.size(0)
+
 
 class PredictionType(StrEnum):
     EPSILON = "epsilon"
@@ -85,6 +87,64 @@ class PredictionType(StrEnum):
 class MetricKey(StrEnum):
     TRAIN_LOSS = "train_loss"
     VAL_LOSS = "val_loss"
+
+
+OptimizerFactoryType = Callable[[Iterator[nn.Parameter]], Optimizer]
+LRSchedulerFactoryType = Callable[[Optimizer, int, int], LRSchedulerConfigType]
+"""Input is Optimizer instance, total number of optimizing steps during training and current step index."""
+
+
+def default_optimizer_factory(
+    params: Iterator[nn.Parameter], *, lr=1e-4, **kwargs
+) -> Optimizer:
+    return torch.optim.AdamW(params, lr=lr, **kwargs)
+
+
+def default_lr_scheduler_factory(
+    optimizer: Optimizer,
+    max_optim_steps: int,
+    current_step: int,
+    *,
+    num_warmup_steps: float | int = 0.2,
+    interval: Literal["epoch", "step"] = "step",
+    lr_freq: int = 1,
+) -> LRSchedulerConfigType:
+    """
+
+    Args:
+        optimizer:
+        max_optim_steps:
+        current_step:
+        num_warmup_steps: should be from 0.02-0.2, lower for the model that already be pretrained well.
+        interval:
+        lr_freq:
+
+    Returns:
+
+    """
+    max_optim_steps = int(max_optim_steps)
+    if isinstance(num_warmup_steps, float):
+        num_warmup_steps = int(num_warmup_steps * max_optim_steps)
+    assert num_warmup_steps < max_optim_steps
+
+    lr_scheduler = get_cosine_schedule_with_warmup(
+        optimizer,
+        num_warmup_steps=num_warmup_steps,
+        num_training_steps=max_optim_steps,
+        num_cycles=0.5,
+        last_epoch=current_step,
+    )
+    return LRSchedulerConfigType(
+        scheduler=lr_scheduler,
+        name="default_sd_optimizer",
+        # Updating the frequency of the scheduler ( call scheduler.step())
+        interval=interval,
+        frequency=lr_freq,
+        # The value for scheduler to depend on to update
+        # monitor=Metric.TRAIN_LOSS,
+        # strict=True # Must have monitor value
+    )
+
 
 # noinspection PyUnresolvedReferences
 class StableDiffusionModule(LightningModule):
@@ -112,6 +172,8 @@ class StableDiffusionModule(LightningModule):
             DDIMScheduler | DDPMScheduler | None
         ) = None,  # TODO: Make enum for typehint, hf so stupid
         feature_extractor: CLIPImageProcessor | None = None,
+        optimizer_factory: None | OptimizerFactoryType = None,
+        lr_scheduler_factory: None | LRSchedulerFactoryType = None,
         **addition_kwargs,
     ):
         """
@@ -184,13 +246,13 @@ class StableDiffusionModule(LightningModule):
         self.loss_fn = nn.MSELoss(reduction="mean")
 
         # 4. Metrics
-        metric_kwargs:dict[MetricKey,dict] = {
+        metric_kwargs: dict[MetricKey, dict] = {
             MetricKey.TRAIN_LOSS: {},
             MetricKey.VAL_LOSS: {},
         }
         for k, v in addition_kwargs.items():
-            if (prefix:=k.split("_")[0]) in MetricKey:
-                metric_kwargs[mkey].update({k.removeprefix(prefix+"_"): v})
+            if (prefix := k.split("_")[0]) in MetricKey:
+                metric_kwargs[mkey].update({k.removeprefix(prefix + "_"): v})
             elif k.startswith("metric_"):
                 for kw in metric_kwargs.values():
                     kw.update({k.removeprefix("metric_"): v})
@@ -204,16 +266,18 @@ class StableDiffusionModule(LightningModule):
 
         # 5. Additions
         self.addition_kwargs = addition_kwargs
+        self.optimizer_factory = optimizer_factory or default_optimizer_factory
+        self.lr_scheduler_factory = lr_scheduler_factory or default_lr_scheduler_factory
 
     @property
-    def sample_size(self)->int|tuple[int,int]|None:
+    def sample_size(self) -> int | tuple[int, int] | None:
         """The images size that use to train base diffusion model.
         Use this sample size for resizing the finetuning data images for more compatible with the pretrained one (But not required).
         """
-        return self.unet.config.sample_size*self.latents_spatial_reduced_ratio
+        return self.unet.config.sample_size * self.latents_spatial_reduced_ratio
 
     @property
-    def num_train_timesteps(self)->int:
+    def num_train_timesteps(self) -> int:
         return self.scheduler.config.num_train_timesteps
 
     @property
@@ -236,7 +300,7 @@ class StableDiffusionModule(LightningModule):
             cast(FloatTensor, latents / self.latents_values_scaling)
         ).sample
 
-    def create_timesteps(self, size: Sequence[int]|int) -> IntTensor:
+    def create_timesteps(self, size: Sequence[int] | int) -> IntTensor:
         size = size if isinstance(size, Sequence) else [size]
         timesteps = torch.randint(
             0,
@@ -245,7 +309,7 @@ class StableDiffusionModule(LightningModule):
             device=self.device,
             dtype=torch.int32,
         )
-        return cast(IntTensor,timesteps)
+        return cast(IntTensor, timesteps)
 
     def create_noises(self, size: Sequence[int]):
         return torch.randn(size, dtype=self.dtype, device=self.device)
@@ -259,7 +323,9 @@ class StableDiffusionModule(LightningModule):
         timesteps = self.create_timesteps(latents.shape[0])
         noisy_latents = self.scheduler.add_noise(latents, noises, timesteps)
 
-        text_encoder_output: BaseModelOutputWithPooling = self.text_encoder(batch.input_ids)
+        text_encoder_output: BaseModelOutputWithPooling = self.text_encoder(
+            batch.input_ids
+        )
         text_embeddings = text_encoder_output.last_hidden_state
 
         unet_output: UNet2DConditionOutput = self.unet(
@@ -279,12 +345,17 @@ class StableDiffusionModule(LightningModule):
             raise RuntimeError(f"The `prediction_type`=`{pred_type}` is not supported.")
 
         loss = self.loss_fn(model_pred, target)
+        if not torch.isfinite(loss):
+            raise RuntimeError(
+                f"Non-finite loss detected at step {self.global_step}: {loss.item()}"
+            )
+
         return loss
 
     def get_metric(self, key: MetricKey) -> Metric:
-        return cast(Metric,self.metrics[key])
+        return cast(Metric, self.metrics[key])
 
-    def get_lrs(self)->dict[str,Any]:
+    def get_lrs(self) -> dict[str, Any]:
         # noinspection SpellCheckingInspection
         optims = self.optimizers()
         if not isinstance(optims, Sequence):
@@ -297,25 +368,24 @@ class StableDiffusionModule(LightningModule):
 
     # Lightning Hooks
 
-    def _log_step(self, dictionary:dict[str|StrEnum, Any], **kwargs) -> None:
-        dictionary = {f"{k}_step":v for k, v in dictionary.items()}
+    def _log_step(self, dictionary: dict[str | StrEnum, Any], **kwargs) -> None:
+        dictionary = {f"{k}_step": v for k, v in dictionary.items()}
         self.log_dict(
             dictionary,
             prog_bar=True,
             logger=False,
-            on_step = True ,
+            on_step=True,
             on_epoch=False,
-            **kwargs
+            **kwargs,
         )
 
-    def _log_epoch(self,dictionary:dict[str|StrEnum, Any], **kwargs) -> None:
+    def _log_epoch(self, dictionary: dict[str | StrEnum, Any], **kwargs) -> None:
         self.log_dict(
             dictionary,
-            prog_bar=False,
             logger=True,
-            on_step = False ,
+            on_step=False,
             on_epoch=True,
-            **kwargs
+            **kwargs,
         )
 
     def training_step(
@@ -325,12 +395,7 @@ class StableDiffusionModule(LightningModule):
 
         # Stream to progress bar only.
         mkey = MetricKey.TRAIN_LOSS
-        self._log_step(
-            {
-                mkey: loss,
-                **self.get_lrs()
-            }
-        )
+        self._log_step({mkey: loss, **self.get_lrs()})
         # Update metric for log epoch loss.
         # IMPORTANCE: WHEN USE Metric instance, the batch_size in self.log is not use.
         # If you pass only value, make sure batch_size in self.log =1.
@@ -348,9 +413,10 @@ class StableDiffusionModule(LightningModule):
             {
                 MetricKey.TRAIN_LOSS: train_metric.compute(),
                 MetricKey.VAL_LOSS: val_metric.compute(),
-                **self.get_lrs()
+                **self.get_lrs(),
             },
-            sync_dist=True
+            prog_bar = True,
+            sync_dist=True,
         )
         train_metric.reset()
         val_metric.reset()
@@ -359,7 +425,14 @@ class StableDiffusionModule(LightningModule):
         self, batch: SDBatch, batch_index: int, **kwargs: Any
     ) -> STEP_OUTPUT:
         loss = self.forward_batch_loss(batch, batch_index, **kwargs)
-        self.get_metric(MetricKey.VAL_LOSS).update(loss, len(batch))
+
+        mkey = MetricKey.VAL_LOSS
+        self._log_step({mkey: loss})
+        self.get_metric(mkey).update(loss, len(batch))
+
+        if self.trainer.state.fn == TrainerFn.VALIDATING:
+            self.log("val_loss", loss, on_epoch=True, on_step=False, batch_size=len(batch))
+
         return loss
 
     def on_validation_batch_end(
@@ -383,33 +456,17 @@ class StableDiffusionModule(LightningModule):
         References:
             https://lightning.ai/docs/pytorch/stable/api/lightning.pytorch.core.LightningModule.html#lightning.pytorch.core.LightningModule.configure_optimizers
         """
-        optimizer = torch.optim.AdamW(self.parameters(), lr=1e-4)
+        num_optim_steps = self.trainer.estimated_stepping_batches
+        current_step = self.global_step - 1
+        logger.debug(
+            f"Total train steps={num_optim_steps},current step={current_step}."
+        )
 
-        num_train_steps = self.trainer.estimated_stepping_batches
-        num_warmup_steps = int(0.02 * num_train_steps)
-        current_step = self.global_step-1
-        step_freq = 1
-
-        logger.debug(f"Total train steps={num_train_steps},current step={current_step}.")
-
-        lr_scheduler = get_cosine_schedule_with_warmup(
-            optimizer,
-            num_warmup_steps=num_warmup_steps,
-            num_training_steps=num_train_steps,
-            num_cycles=0.5,
-            last_epoch=current_step,
+        optimizer = self.optimizer_factory(self.parameters())
+        lr_scheduler = self.lr_scheduler_factory(
+            optimizer, num_optim_steps, current_step
         )
 
         return OptimizerLRSchedulerConfig(
-            optimizer=optimizer,
-            lr_scheduler=LRSchedulerConfigType(
-                scheduler=lr_scheduler,
-                name="default_sd_optimizer",
-                # Updating the frequency of the scheduler ( call scheduler.step())
-                interval="step",
-                frequency=step_freq,
-                # The value for scheduler to depend on to update
-                # monitor=Metric.TRAIN_LOSS,
-                # strict=True # Must have monitor value
-            ),
+            optimizer=optimizer, lr_scheduler=lr_scheduler
         )
