@@ -52,7 +52,7 @@ class SDBatch(BaseModel):
         assert images.size(1) == 3
         assert len(images.shape) == 4
         assert (self.images.max() <= 1.0).all() and (self.images.min() >= -1.0).all()
-
+        #todo: init b to zero, a to normal
         return self
 
     def to(self, device=None, dtype=None, **kwargs) -> Self:
@@ -293,7 +293,7 @@ class StableDiffusionModule(LightningModule):
     def vae_encode(self, images: torch.Tensor) -> torch.Tensor:
         latent_dist: DiagonalGaussianDistribution = self.vae.encode(images).latent_dist
         latents = latent_dist.sample() * self.latents_values_scaling
-        return latents
+        return latents.to(device = self.device, dtype = self.dtype)
 
     def vae_decode(self, latents: Tensor) -> torch.Tensor:
         return self.vae.decode(
@@ -307,7 +307,7 @@ class StableDiffusionModule(LightningModule):
             self.num_train_timesteps,
             size,
             device=self.device,
-            dtype=torch.int32,
+            dtype=torch.long,
         )
         return cast(IntTensor, timesteps)
 
@@ -327,9 +327,9 @@ class StableDiffusionModule(LightningModule):
             batch.input_ids
         )
         text_embeddings = text_encoder_output.last_hidden_state
-
+        
         unet_output: UNet2DConditionOutput = self.unet(
-            noisy_latents, timesteps, text_embeddings
+            sample = noisy_latents, timestep=timesteps, encoder_hidden_states=text_embeddings
         )
         model_pred = unet_output.sample
 
@@ -343,7 +343,8 @@ class StableDiffusionModule(LightningModule):
             target = self.scheduler.get_velocity(latents, noises, timesteps)
         else:
             raise RuntimeError(f"The `prediction_type`=`{pred_type}` is not supported.")
-
+        
+        assert model_pred.shape == target.shape
         loss = self.loss_fn(model_pred, target)
         if not torch.isfinite(loss):
             raise RuntimeError(
