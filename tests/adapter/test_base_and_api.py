@@ -4,7 +4,7 @@ from typing import cast, Type
 
 import pytest
 import torch
-from loguru import logger
+from petorch import logger
 from torch import Tensor, nn
 from torch.utils.hooks import RemovableHandle
 

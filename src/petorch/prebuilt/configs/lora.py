@@ -31,7 +31,7 @@ MODULE_ADAPTER_CLASSES_MAP = {
 
 def _all_fqn(a:str)->bool:
     return True
-
+# TODO: make the filter of dispatch process become configurable for persist. Maybe define the process, and allow config that process.
 class LoraConfig(BaseModelAdaptionConfig):
     rank: PositiveInt = 8
     alpha: PositiveInt = 16

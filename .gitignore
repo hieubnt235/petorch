@@ -1,5 +1,4 @@
 __pycache__/
 /src/petorch.egg-info/
 .idea/
-/sd_2_1_naruto/
-/examples/sd_2_1_naruto/
+/storage/

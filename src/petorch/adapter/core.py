@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Sequence, cast, Any, TypedDict, Type, Unpack
-from loguru import logger
+from ..utilities import logger
 import torch
 from pydantic import BaseModel, ConfigDict, Field
 from torch import nn

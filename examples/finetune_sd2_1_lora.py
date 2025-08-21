@@ -1,35 +1,38 @@
+import sys
 import warnings
+from pathlib import Path
 from types import MethodType
-from typing import Callable, TypeVar, cast, Type, Generic, Iterator
+from typing import Callable, TypeVar, cast, Type, Generic, Iterator, Sequence, Any
 from weakref import proxy
+
+import fsspec
 import lightning as pl
 import safetensors.torch as st
 import torch
 import torchvision.transforms.v2 as transforms
 from datasets import load_dataset, Dataset as ArrDataset
-from lightning import LightningDataModule, Trainer
+from jedi.api import project
+from lightning import LightningDataModule, Trainer, Callback
 from lightning.pytorch.callbacks import ModelCheckpoint, TQDMProgressBar, ModelSummary
-from lightning.pytorch.loggers import CSVLogger
-from lightning.pytorch.utilities.model_summary import summarize
+from lightning.pytorch.loggers import CSVLogger, WandbLogger, Logger
+from torch.optim import Optimizer
 from torch.utils.data import DataLoader as TorchDataLoader, default_collate
-from transformers import CLIPTokenizerFast
-from pathlib import Path
-from petorch import AdapterAPI
+from transformers import CLIPTokenizerFast, PreTrainedTokenizerBase
+
+from petorch import AdapterAPI, logger
 from petorch.integrations.diffusers.stable_diffusion import (
     StableDiffusionModule,
     SDBatch,
     MetricKey,
 )
 from petorch.prebuilt.configs import LoraConfig
-from loguru import logger
 
 model_id = "stabilityai/stable-diffusion-2-1"
 
-
-image_train_size = (256, 256)
-image_transform = transforms.Compose(
+def get_image_transform(size: int|Sequence[int]|None=None)-> transforms.Transform:
+    return transforms.Compose(
     [
-        transforms.Resize(image_train_size),
+        transforms.Resize(size or (256,256) ),
         transforms.RandomHorizontalFlip(),
         transforms.ToImage(),  # PIL to tensor
         transforms.ToDtype(
@@ -39,15 +42,16 @@ image_transform = transforms.Compose(
     ]
 )
 
-tokenizer: CLIPTokenizerFast = CLIPTokenizerFast.from_pretrained(
-    model_id, subfolder="tokenizer"
-)
+def get_clip_tokenizer(model_path:str="stabilityai/stable-diffusion-2-1", subfolder:str="tokenizer")->CLIPTokenizerFast:
+    return CLIPTokenizerFast.from_pretrained(
+        model_path, subfolder=subfolder
+    )
 
-
-def text_transform(text: str | list[str]) -> torch.Tensor:
-    batch_encoding = tokenizer.__call__(text, padding=True, return_tensors="pt")
-    return batch_encoding.input_ids
-
+def get_text_transform(tokenizer: PreTrainedTokenizerBase)->Callable[[str|list[str]], torch.Tensor]:
+    def text_transform(text: str | list[str]) -> torch.Tensor:
+        batch_encoding = tokenizer.__call__(text, padding=True, return_tensors="pt")
+        return batch_encoding.input_ids
+    return text_transform
 
 _T_Co = TypeVar("_T_Co", covariant=True)
 
@@ -65,16 +69,27 @@ class NarutoBlipDataModule(LightningDataModule, Generic[_Batch_T]):
     batch_type: Type[_Batch_T] = SDBatch
 
     def __init__(
-        self,
+        self,*,
         image_transform_fn: Callable = None,
         text_transform_fn: Callable = None,
-        train_ratio: float = 0.9,
+        train_ratio: float = 0.8,
         num_workers: int = 8,
         batch_size=8,
     ):
+        """
+
+        Args:
+            image_transform_fn: If not provide, they will be init after trainer is assigned, see `setup_transforms`.
+            text_transform_fn:  See `image_transform_fn`
+            train_ratio:
+            num_workers:
+            batch_size:
+        """
+
         super().__init__()
-        self.image_transform = image_transform_fn or image_transform
-        self.text_transform = text_transform_fn or text_transform
+        # If None, assign when trainer is assigned (in `setup`).
+        self.image_transform = image_transform_fn
+        self.text_transform = text_transform_fn
 
         assert train_ratio > 0
         self.train_ratio = min(1.0, train_ratio)
@@ -98,15 +113,39 @@ class NarutoBlipDataModule(LightningDataModule, Generic[_Batch_T]):
     def prepare_data(self) -> None:
         load_dataset(self.model_id)
 
+    @property
+    def lightning_module(self):
+        return self.trainer.lightning_module
+
+    def setup_transforms(self):
+        if self.text_transform is None:
+            tokenizer = getattr(self.lightning_module,"tokenizer", None)
+            if tokenizer is None:
+                logger.info(f"`text_transform` was not given, and `lightning_module` does not have `tokenizer` attribute."
+                            f"Use the default from `{get_clip_tokenizer}` constructor for create transform.")
+                tokenizer = get_clip_tokenizer()
+            else:
+                logger.info(f"`text_transform` was not given, use `lightning_module.tokenizer` for transform.")
+            self.text_transform = get_text_transform(tokenizer)
+
+        if self.image_transform is None:
+            sample_size = getattr(self.lightning_module,"sample_size", None)
+            if sample_size is None:
+                logger.info(f"`image_transform` was not given, and `lightning_module` does not have `sample_size` attribute."
+                            f"Use the default from `{get_image_transform}` constructor for create transform.")
+            else:
+                logger.info(f"`image_transform` was not given, use `lightning_module.sample_size`={sample_size} for constructing transform.")
+            self.image_transform = get_image_transform(sample_size)
+
     def setup(self, stage: str = None) -> None:
         dataset = load_dataset(self.model_id, split="train")
+        self.setup_transforms()
 
         def _transform(sample: dict):
             return dict(
                 images=self.image_transform(sample["image"]),
                 input_ids=self.text_transform(sample["text"]),
             )
-
         dataset.set_transform(_transform)
         self.dataset = dataset
 
@@ -133,113 +172,283 @@ class NarutoBlipDataModule(LightningDataModule, Generic[_Batch_T]):
     #         return super().val_dataloader()
     #     else:
 
+    def transfer_batch_to_device(self, batch: SDBatch, device: torch.device, dataloader_idx: int) -> SDBatch:
+        return batch.to(device=device, dtype = self.lightning_module.dtype)
+
 
 class LoraCheckpoint(ModelCheckpoint):
     FILE_EXTENSION = ".safetensors"
+    def _save_checkpoint(self, trainer: pl.Trainer, filepath: str) -> None:
+        # Adapt to CheckpointIO of DDPStrategy.
+        if trainer.is_global_zero:
+            try:
+                state_dict = AdapterAPI.get_adapter_state_dict(trainer.lightning_module)
+                if state_dict:
 
-    def _save_checkpoint(self, pl_trainer: pl.Trainer, filepath: str) -> None:
-        try:
-            state_dict = AdapterAPI.get_adapter_state_dict(pl_trainer.lightning_module)
+                    # Create folder
+                    Path(filepath).parent.mkdir(parents=True, exist_ok=True)
+                    logger.info(f"Saving Lora checkpoint: {filepath}")
 
-            if state_dict:
-                # Create folder
-                Path(filepath).parent.mkdir(parents=True, exist_ok=True)
-                logger.debug(f"Save checkpoint: {filepath}")
-                st.save_file(state_dict, filepath)
+                    # Save
+                    byte_tensor = st.save(state_dict)
+                    fs, urlpath = fsspec.core.url_to_fs(str(filepath))
+                    with fs.transaction, fs.open(urlpath, "wb") as f:
+                        f.write(byte_tensor)
 
-                self._last_global_step_saved = trainer.global_step
-                self._last_checkpoint_saved = filepath
+                    # Above saving steps can be simple like this if don't care about atomic of saving.
+                    # st.save_file(state_dict, filepath)
 
-                # notify loggers
-                if trainer.is_global_zero:
+                    # Copy from parent
+                    self._last_global_step_saved = trainer.global_step
+                    self._last_checkpoint_saved = filepath
                     for tl_logger in trainer.loggers:
                         tl_logger.after_save_checkpoint(proxy(self))
-            else:
-                logger.error("Got blank lora state dict.")
+                else:
+                    logger.error("Got blank lora state dict.")
 
-        except ValueError as e:
-            if "Model does not have any adapter" not in str(e):
-                raise e
-            else:
-                warnings.warn(str(e))
-
-
-dirpath = "sd_2_1_naruto"
-checkpoints_path = f"{dirpath}/checkpoints"
-save_every_n_epochs = 3
-max_steps = 3000
+            except ValueError as e:
+                if "Model does not have any adapter" not in str(e):
+                    raise e
+                else:
+                    warnings.warn(str(e))
 
 
-def create_metric_checkpoint_callback(metric: MetricKey, mode="min"):
+class DebugCallback(pl.Callback):
+    def __init__(self, every_n_batch_steps:int = 10, verbose:bool=False, rank_zero_only: bool = True):
+        self.every_n_batch_steps = every_n_batch_steps
+        self.total_training_batches = -999
+        self.verbose = verbose
+        self.rank_zero_only = rank_zero_only
 
-    # This call back will default as every_n_train_steps = 1.
-    # And `save_on_train_epoch_end=True`. So that it check when `on_train_epoch_end` hook.
-    # save_last is None, so only save for top k of monitor value.
-    # This note save last because we not set save last, and provide monitor.
-    return LoraCheckpoint(
-        dirpath=checkpoints_path,
-        filename=f"{{epoch}}-{{step}}-min_{{{metric}:.4f}}",
-        monitor=metric,
-        mode=mode,
-        save_top_k=1,
-        # every_n_epochs=save_every_n_epochs,
-        save_on_train_epoch_end=True,
-        save_weights_only=True,
-    )
+    def _should_skip(self, trainer: "pl.Trainer") -> bool:
+        if self.rank_zero_only and (not trainer.is_global_zero):
+            return True
+        return False
+
+    def on_train_start(self, trainer: "pl.Trainer", pl_module: "pl.LightningModule") -> None:
+        if self._should_skip(trainer):
+            return
+
+        self.total_training_batches = trainer.estimated_stepping_batches*trainer.accumulate_grad_batches
+        logger.info(
+            f"""
+------- Training starting ------------------------
+Training batches per epoch: {trainer.num_training_batches}
+Total training batches: {self.total_training_batches}
+Gradient accumulation batch steps: {trainer.accumulate_grad_batches}
+Total optimization steps: {trainer.estimated_stepping_batches}
+Validation batches during training: {trainer.num_val_batches}
+--------------------------------------------------
+            """
+        )
+    def on_train_end(self, trainer: "pl.Trainer", pl_module: "pl.LightningModule") -> None:
+        if self._should_skip(trainer):
+            return
+
+        self.total_training_batches=-999
+
+    def on_train_batch_start(
+        self, trainer: "pl.Trainer", pl_module: "pl.LightningModule", batch: Any, batch_idx: int
+    ) -> None:
+        if self._should_skip(trainer):
+            return
+
+        if trainer.fit_loop.total_batch_idx%self.every_n_batch_steps == 0:
+            if self.verbose:
+                if isinstance(batch, SDBatch):
+                    batch = cast(SDBatch, batch)
+                    images , input_ids = batch.images, batch.input_ids
+                    logger.debug(f"`images`: {images.shape}-{images.device}-{images.dtype}\n"
+                                 f"`input_ids`: {input_ids.shape}-{input_ids.device}-{input_ids.dtype}\n")
+
+    def on_before_zero_grad(self, trainer: "pl.Trainer", pl_module: "pl.LightningModule", optimizer: Optimizer) -> None:
+        if self._should_skip(trainer):
+            return
+
+        if self.verbose:
+            logger.debug(f"on_before_zero_grad on batch_idx {trainer.fit_loop.total_batch_idx}/{self.total_training_batches}")
+
+    def on_before_optimizer_step(
+        self, trainer: "pl.Trainer", pl_module: "pl.LightningModule", optimizer: Optimizer
+    ) -> None:
+        if self._should_skip(trainer):
+            return
+
+        if self.verbose:
+            logger.debug(f"on_before_optimizer_step on batch_idx {trainer.fit_loop.total_batch_idx}/{self.total_training_batches}")
+
+PROJECT_NAME =  "sd_2_1_lora_naruto_blip"
 
 
-callbacks = [
-    create_metric_checkpoint_callback(metric)
-    for metric in [MetricKey.TRAIN_LOSS, MetricKey.VAL_LOSS]
-]
-# noinspection PyTypeChecker
-callbacks.extend(
-    [
-        # see `ModelCheckpoint._save_none_monitor_checkpoint`, it will call `_save_none_monitor_checkpoint` if monitor
-        # is not provide, so although we not use save_last, it still save the last each epoch.
-        # Not set save_weights_only, save for everything.
-        ModelCheckpoint(
-            dirpath=checkpoints_path,
-            filename="{epoch}-{step}-last",
-            save_top_k=1,
-            # every_n_train_steps=int(max_steps / 10),
-            save_on_train_epoch_end=True,
-        ),
-        TQDMProgressBar(leave=True),
-        ModelSummary(max_depth=-1),
-    ]
-)
-loggers = [CSVLogger(dirpath, version=0),]
-
-trainer = Trainer(
-    default_root_dir=dirpath,
-    callbacks=callbacks,
-    logger=loggers,
+def get_trainer(
+    dirpath: str,
+    checkpoints_path: str = None,
+    version:int| None = None,
+    *,
+    max_steps=3000,
+    max_epochs=None,
+    save_best_every_n_epochs=1,
+    save_best_every_n_train_steps=None,
+    save_last_every_n_epochs=None,  # Default = max_steps/10
+    save_last_every_n_train_steps=None,
+    accumulate_grad_batches=4,
     precision="bf16-true",
-    max_steps=max_steps,
-    num_sanity_val_steps=0,
-    # accelerator="cpu",
-    # fast_dev_run=10,
-    limit_train_batches=0.2,
-    limit_val_batches=0.2,
-)
+    addition_callbacks: list[Callback] = None,
+    addition_loggers: list[Logger] = None,
+    debug: bool = False,
+    debug_downscale: float = 0.2,
+    **kwargs,
+):
+    """
+
+    Args:
+        dirpath:
+        checkpoints_path:
+        max_steps: Number of doing optimizer.step().
+        max_epochs:
+        save_best_every_n_epochs:
+        save_best_every_n_train_steps: Number of doing optimizer.step().
+        save_last_every_n_epochs:
+        save_last_every_n_train_steps: Number of doing optimizer.step().
+        precision:
+        accumulate_grad_batches:
+        addition_callbacks:
+        debug:
+        debug_downscale:
+        **kwargs:
+
+    Returns:
+
+    """
+    checkpoints_path = checkpoints_path or f"{dirpath}/checkpoints"
+    if version is None:
+        version = 0
+        while True:
+            if not Path(checkpoints_path).joinpath(f"version_{version}").exists():
+                break
+            version+=1
+    assert isinstance(version,int) and  version >= 0
+    checkpoints_path=Path(checkpoints_path).joinpath(f"version_{version}").as_posix()
+
+    save_last_every_n_train_steps = save_last_every_n_train_steps or int(max_steps / 10)
+
+    def create_metric_checkpoint_callback(metric: MetricKey, mode="min"):
+
+        # This call back will default as every_n_train_steps = 1.
+        # And `save_on_train_epoch_end=True`. So that it check when `on_train_epoch_end` hook.
+        # save_last is None, so only save for top k of monitor value.
+        # This note save last because we not set save last, and provide monitor.
+        return LoraCheckpoint(
+            dirpath=checkpoints_path,
+            filename=f"{{epoch}}-{{step}}-min_{{{metric}:.4f}}",
+            monitor=metric,
+            mode=mode,
+            save_top_k=1,
+            # I save best depend on the epoch metric, so i set every_n_epochs here.
+            every_n_epochs=save_best_every_n_epochs,
+            every_n_train_steps=save_best_every_n_train_steps,
+            save_on_train_epoch_end=True,
+            save_weights_only=True,
+
+        )
+
+    callbacks:list[pl.Callback] = [
+        create_metric_checkpoint_callback(metric)
+        for metric in [MetricKey.TRAIN_LOSS, MetricKey.VAL_LOSS]
+    ]
+    callbacks.extend(
+        [
+            # see `ModelCheckpoint._save_none_monitor_checkpoint`, it will call `_save_none_monitor_checkpoint` if monitor
+            # is not provide, so although we not use save_last, it still save the last each epoch.
+            # Not set save_weights_only, save for everything.
+            ModelCheckpoint(
+                dirpath=checkpoints_path,
+                filename="{epoch}-{step}-last",
+                save_top_k=1,
+                every_n_epochs=save_last_every_n_epochs,
+                every_n_train_steps=save_last_every_n_train_steps,
+                save_on_train_epoch_end=True,
+            ),
+            TQDMProgressBar(leave=True),
+            ModelSummary(max_depth=1),
+
+        ]
+    )
+    if addition_callbacks:
+        callbacks.extend(addition_callbacks)
+    loggers: list[Logger] = [
+        CSVLogger(dirpath, "logs"),
+    ]
+    if addition_loggers:
+        loggers.extend(addition_loggers)
+
+    if debug:
+        assert 0<=debug_downscale<=1
+        kwargs["limit_train_batches"] = kwargs.get("limit_train_batches") or debug_downscale
+        kwargs["limit_val_batches"] = kwargs.get("limit_val_batches") or  debug_downscale
+        max_steps = debug_downscale*max_steps
+        accumulate_grad_batches = 1
+        callbacks.append(DebugCallback(1, verbose=True))
+    else:
+        callbacks.append(DebugCallback(10, verbose = False))
+
+    trainer = Trainer(
+        default_root_dir=dirpath,
+        callbacks=callbacks,
+        logger=loggers,
+        precision=precision,
+        max_steps=max_steps,
+        max_epochs=max_epochs,
+        num_sanity_val_steps=0,
+        accumulate_grad_batches = accumulate_grad_batches,
+        # accelerator="cpu",
+        # fast_dev_run=10,
+        # limit_train_batches=0.2,
+        # limit_val_batches=0.2,
+        **kwargs
+    )
+    return trainer
+
 
 if __name__ == "__main__":
-    data_module = NarutoBlipDataModule(batch_size=8)
-    module = StableDiffusionModule(model_id=model_id)
 
-    # Freeze and add adapter to unet
+    # 1. Prepare model
+    module = StableDiffusionModule(model_id=model_id)
     module.requires_grad_(False)
-    config = LoraConfig(adapter_name="default", rank=8, alpha=16,
-                        fqname_filter=lambda n: "unet" in n)
+    config = LoraConfig(
+        adapter_name="default", rank=8, alpha=16, fqname_filter=lambda _n: "unet" in _n
+    )
     AdapterAPI.add_adapter(module, config, activate=True)
 
+    # 2. Make sure everything as expected.
     n,t  = 0,0
     for name, param in module.named_parameters():
         t+=param.numel()
         if param.requires_grad:
             assert "lora" in name
             n+=param.numel()
-    print(f"Trainable params/Total params/Ratio: {n:,}/{t:,}/{n/t:.4f}")
+    logger.debug(f"Trainable params/Total params/Ratio: {n:,}/{t:,}/{n/t:.4f}")
 
-    trainer.fit(module, datamodule=data_module)
+    # 3. Prepare data
+    data_module = NarutoBlipDataModule(
+        batch_size=4,
+        num_workers=32,
+        train_ratio=0.8
+    )
+
+    # 4. Train
+    wandb_logger = WandbLogger(
+        name = "train_sd_2_1_lora",
+        project=PROJECT_NAME,
+        # log_model=True,
+        save_dir=cast(str,None)
+    )
+    storage_path = "/home/a3ilab01/h-ws/petorch/storage/"
+    pl_trainer = get_trainer(
+        storage_path+PROJECT_NAME,
+        accumulate_grad_batches=4,
+        addition_loggers=[
+            wandb_logger
+        ]
+    )
+    pl_trainer.fit(module, datamodule=data_module)

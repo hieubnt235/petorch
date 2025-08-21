@@ -19,7 +19,7 @@ from lightning.pytorch.utilities.types import (
     OptimizerLRSchedulerConfig,
     LRSchedulerConfigType,
 )
-from loguru import logger
+from petorch import logger
 from pydantic import BaseModel, ConfigDict, model_validator
 from torch import Tensor, IntTensor, FloatTensor
 from torch import nn
@@ -206,13 +206,24 @@ class StableDiffusionModule(LightningModule):
         self.addition_kwargs = addition_kwargs
 
     @property
+    def sample_size(self)->int|tuple[int,int]|None:
+        """The images size that use to train base diffusion model.
+        Use this sample size for resizing the finetuning data images for more compatible with the pretrained one (But not required).
+        """
+        return self.unet.config.sample_size*self.latents_spatial_reduced_ratio
+
+    @property
+    def num_train_timesteps(self)->int:
+        return self.scheduler.config.num_train_timesteps
+
+    @property
     def latents_values_scaling(self) -> float:
         """Default to 0.18215 and latents values should be multiplied after `vae.encode` and `divided` before `vae.decode`."""
         return self.vae.config.scaling_factor
 
     @property
     def latents_spatial_reduced_ratio(self) -> int:
-        """The reduced ratio"""
+        """The reduced ratio of vae latents"""
         return 2 ** (len(self.vae.config.block_out_channels) - 1)
 
     def vae_encode(self, images: torch.Tensor) -> torch.Tensor:
@@ -229,7 +240,7 @@ class StableDiffusionModule(LightningModule):
         size = size if isinstance(size, Sequence) else [size]
         timesteps = torch.randint(
             0,
-            self.scheduler.config.num_train_timesteps,
+            self.num_train_timesteps,
             size,
             device=self.device,
             dtype=torch.int32,
@@ -285,8 +296,6 @@ class StableDiffusionModule(LightningModule):
         return lrs
 
     # Lightning Hooks
-    def transfer_batch_to_device(self, batch: SDBatch, device: torch.device, dataloader_idx: int) -> SDBatch:
-        return batch.to(device=device, dtype = self.dtype)
 
     def _log_step(self, dictionary:dict[str|StrEnum, Any], **kwargs) -> None:
         dictionary = {f"{k}_step":v for k, v in dictionary.items()}
@@ -365,7 +374,6 @@ class StableDiffusionModule(LightningModule):
     def on_validation_epoch_end(self) -> None:
         """This step is performed in `on_train_epoch_end`.Redefine here just to notices."""
         pass
-
 
     def configure_optimizers(self) -> OptimizerLRScheduler:
         """
