@@ -52,7 +52,6 @@ class SDBatch(BaseModel):
         assert images.size(1) == 3
         assert len(images.shape) == 4
         assert (self.images.max() <= 1.0).all() and (self.images.min() >= -1.0).all()
-        #todo: init b to zero, a to normal
         return self
 
     def to(self, device=None, dtype=None, **kwargs) -> Self:
@@ -105,7 +104,7 @@ def default_lr_scheduler_factory(
     max_optim_steps: int,
     current_step: int,
     *,
-    num_warmup_steps: float | int = 0.2,
+    num_warmup_steps: float | int = 0.05,
     interval: Literal["epoch", "step"] = "step",
     lr_freq: int = 1,
 ) -> LRSchedulerConfigType:
@@ -170,7 +169,7 @@ class StableDiffusionModule(LightningModule):
         tokenizer: CLIPTokenizer | CLIPTokenizerFast | None = None,
         scheduler: (
             DDIMScheduler | DDPMScheduler | None
-        ) = None,  # TODO: Make enum for typehint, hf so stupid
+        ) = None,
         feature_extractor: CLIPImageProcessor | None = None,
         optimizer_factory: None | OptimizerFactoryType = None,
         lr_scheduler_factory: None | LRSchedulerFactoryType = None,
@@ -369,38 +368,18 @@ class StableDiffusionModule(LightningModule):
 
     # Lightning Hooks
 
-    def _log_step(self, dictionary: dict[str | StrEnum, Any], **kwargs) -> None:
-        dictionary = {f"{k}_step": v for k, v in dictionary.items()}
-        self.log_dict(
-            dictionary,
-            prog_bar=True,
-            logger=False,
-            on_step=True,
-            on_epoch=False,
-            **kwargs,
-        )
-
-    def _log_epoch(self, dictionary: dict[str | StrEnum, Any], **kwargs) -> None:
-        self.log_dict(
-            dictionary,
-            logger=True,
-            on_step=False,
-            on_epoch=True,
-            **kwargs,
-        )
-
     def training_step(
         self, batch: SDBatch, batch_index: int, **kwargs: Any
     ) -> STEP_OUTPUT:
         loss = self.forward_batch_loss(batch, batch_index, **kwargs)
 
-        # Stream to progress bar only.
         mkey = MetricKey.TRAIN_LOSS
-        self._log_step({mkey: loss, **self.get_lrs()})
-        # Update metric for log epoch loss.
         # IMPORTANCE: WHEN USE Metric instance, the batch_size in self.log is not use.
         # If you pass only value, make sure batch_size in self.log =1.
         self.get_metric(mkey).update(loss, len(batch))
+
+        # Note that when the value is logged in step hook, logger only received after `Trainer.log_in_every_n_steps`
+        self.log(f"{mkey}_step",loss, logger=True, prog_bar=True, on_step=True, on_epoch=False)
         return loss
 
     def on_train_epoch_end(self) -> None:
@@ -410,13 +389,15 @@ class StableDiffusionModule(LightningModule):
         """
         train_metric = self.get_metric(MetricKey.TRAIN_LOSS)
         val_metric = self.get_metric(MetricKey.VAL_LOSS)
-        self._log_epoch(
+        self.log_dict(
             {
                 MetricKey.TRAIN_LOSS: train_metric.compute(),
                 MetricKey.VAL_LOSS: val_metric.compute(),
-                **self.get_lrs(),
             },
-            prog_bar = True,
+            prog_bar=True,
+            logger=True,
+            on_epoch=True,
+            on_step=False,
             sync_dist=True,
         )
         train_metric.reset()
@@ -428,11 +409,13 @@ class StableDiffusionModule(LightningModule):
         loss = self.forward_batch_loss(batch, batch_index, **kwargs)
 
         mkey = MetricKey.VAL_LOSS
-        self._log_step({mkey: loss})
         self.get_metric(mkey).update(loss, len(batch))
+        # Note, this log is log on train progress bar. See `TQDMProgressBar` callback on this hook.
+        # self.log(f"{mkey}_step",loss, logger=False, prog_bar=True, on_step=True, on_epoch=False)
 
+        # For Trainer.validate return only.
         if self.trainer.state.fn == TrainerFn.VALIDATING:
-            self.log("val_loss", loss, on_epoch=True, on_step=False, batch_size=len(batch))
+            self.log(mkey, loss, on_epoch=True, on_step=False, batch_size=len(batch))
 
         return loss
 

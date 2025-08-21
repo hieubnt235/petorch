@@ -11,8 +11,9 @@ import torch
 import torchvision.transforms.v2 as transforms
 from datasets import load_dataset, Dataset as ArrDataset
 from lightning import LightningDataModule, Trainer, Callback
-from lightning.pytorch.callbacks import ModelCheckpoint, TQDMProgressBar, ModelSummary
-from lightning.pytorch.loggers import CSVLogger, WandbLogger, Logger
+from lightning.pytorch.callbacks import ModelCheckpoint, TQDMProgressBar, ModelSummary, LearningRateMonitor, \
+    EarlyStopping
+from lightning.pytorch.loggers import WandbLogger, Logger
 from torch.optim import Optimizer
 from torch.utils.data import DataLoader as TorchDataLoader, default_collate
 from transformers import CLIPTokenizerFast, PreTrainedTokenizerBase
@@ -235,6 +236,7 @@ Training batches per epoch: {trainer.num_training_batches}
 Total training batches: {self.total_training_batches}
 Gradient accumulation batch steps: {trainer.accumulate_grad_batches}
 Total optimization steps: {trainer.estimated_stepping_batches}
+Current optimization steps: {trainer.global_step-1}
 Validation batches during training: {trainer.num_val_batches}
 --------------------------------------------------
             """
@@ -275,7 +277,41 @@ Validation batches during training: {trainer.num_val_batches}
         if self.verbose:
             logger.debug(f"on_before_optimizer_step on batch_idx {trainer.fit_loop.total_batch_idx}/{self.total_training_batches}")
 
-PROJECT_NAME =  "sd_2_1_lora_naruto_blip"
+class GenImageWandbCallback(Callback):
+
+    def __init__(self, *pipeline_args, every_n_epoch:int=5, wandb_logger: WandbLogger=None,wandb_kwargs:dict=None,**pipeline_kwargs):
+        """
+        Args:
+            wandb_logger: If None, try to find logger from Trainer.
+
+        """
+        self.wandb_logger = wandb_logger
+        self.pipeline_args = pipeline_args
+        self.pipeline_kwargs = pipeline_kwargs
+        self.wandb_kwargs  = wandb_kwargs or {}
+        self.every_n_epoch = every_n_epoch
+
+    def on_train_epoch_end(self, trainer: "pl.Trainer", pl_module: "pl.LightningModule") -> None:
+        if trainer.is_global_zero and trainer.current_epoch%self.every_n_epoch == 0 :
+            wandb_logger = self.wandb_logger
+            if wandb_logger is None:
+                for pl_logger in trainer.loggers:
+                    if isinstance(pl_logger, WandbLogger):
+                        wandb_logger = pl_logger
+                        break
+
+            if wandb_logger is not None:
+                assert isinstance(wandb_logger, WandbLogger)
+                logger.info(f"Generating images at step{trainer.global_step}...")
+                sd_module = cast(StableDiffusionModule, pl_module)
+
+                with torch.no_grad():
+                    images = sd_module.pipeline(*self.pipeline_args,**self.pipeline_kwargs).images
+
+                wandb_logger.log_image(f"images_step_{trainer.global_step}", images,**self.wandb_kwargs)
+
+
+PROJECT_NAME =  "sd_2_1_naruto_blip_lora_r16"
 
 
 def get_trainer(
@@ -374,9 +410,7 @@ def get_trainer(
     )
     if addition_callbacks:
         callbacks.extend(addition_callbacks)
-    loggers: list[Logger] = [
-        CSVLogger(dirpath, "logs"),
-    ]
+    loggers: list[Logger] = []
     if addition_loggers:
         loggers.extend(addition_loggers)
 
@@ -428,12 +462,12 @@ def get_sd_module(adt_config: LoraConfig=None, adt_ckpt:str=None, **module_kwarg
     return module
 
 if __name__ == "__main__":
-    storage_path = "/home/a3ilab01/h-ws/petorch/storage/"
+    storage_path = "/home/a3ilab01/petorch/storage/"
     adt_ckpt = None
 
     # 1. Prepare model
     config = LoraConfig(
-        adapter_name="default", rank=8, alpha=16, fqname_filter=lambda _n: "unet" in _n
+        adapter_name="default", rank=16, alpha=16, fqname_filter=lambda _n: "unet" in _n
     )
     module = get_sd_module(config, adt_ckpt)
 
@@ -446,16 +480,23 @@ if __name__ == "__main__":
 
     # 3. Prepare trainer
     wandb_logger = WandbLogger(
-        name = "train_sd_2_1_lora",
+        name = "train_sd_2_1_lora_rank_16",
         project=PROJECT_NAME,
         # log_model=True,
         save_dir=cast(str,None)
     )
+
     pl_trainer = get_trainer(
         storage_path+PROJECT_NAME,
+        max_steps=10000,
         accumulate_grad_batches=4,
-        addition_loggers=[
-            wandb_logger
-        ]
+        addition_loggers=[wandb_logger],
+        addition_callbacks=[
+            LearningRateMonitor(),
+            EarlyStopping(MetricKey.TRAIN_LOSS,patience=30),
+            GenImageWandbCallback("A beautiful girl with glasses", every_n_epochs=10),
+        ],
+        log_every_n_steps = 10, # batch steps (training_step)
+        # debug=True
     )
     pl_trainer.fit(module, datamodule=data_module)
