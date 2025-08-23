@@ -1,3 +1,5 @@
+import base64
+
 from torch import nn
 
 
@@ -35,3 +37,11 @@ def freeze_module(module: nn.Module)->int:
             param.requires_grad_(False)
             n+=param.numel()
     return n
+
+def b64encode(x: str) -> str:
+    """Encode directory string into base64-safe string."""
+    return base64.urlsafe_b64encode(x.encode()).decode()
+
+def b64decode(y: str) -> str:
+    """Decode base64-safe string back into original string."""
+    return base64.urlsafe_b64decode(y.encode()).decode()

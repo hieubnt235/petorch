@@ -20,6 +20,8 @@ from lightning.pytorch.utilities.types import (
     OptimizerLRSchedulerConfig,
     LRSchedulerConfigType,
 )
+import numpy as np
+import PIL
 from petorch import logger
 from pydantic import BaseModel, ConfigDict, model_validator
 from torch import Tensor, IntTensor, FloatTensor
@@ -312,6 +314,10 @@ class StableDiffusionModule(LightningModule):
 
     def create_noises(self, size: Sequence[int]):
         return torch.randn(size, dtype=self.dtype, device=self.device)
+
+    def forward(self, *args: Any, **kwargs: Any) -> list[PIL.Image.Image]| np.ndarray:
+        #todo: typehint input
+        return self.pipeline.__call__(*args, **kwargs).images
 
     def forward_batch_loss(
         self, batch: SDBatch, batch_index: int, **kwargs
