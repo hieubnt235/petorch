@@ -47,7 +47,7 @@ DEFAULT_LOGGER_FORMAT = ("<green><b>[{time:YYYY-MM-DD HH:mm:ss.SSS}]</b></green>
                          "<level> :~ {message}</level>"
                          )
 def setup_logger(level=None):
-    level = level or os.getenv("LOG_LEVEL","DEBUG")
+    level = level or os.getenv("LOG_LEVEL","INFO")
 
     def log_filter(record: "loguru.Record") -> bool:
         name = record.get("name")

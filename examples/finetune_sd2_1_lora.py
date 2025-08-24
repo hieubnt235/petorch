@@ -1,6 +1,7 @@
 import pprint
 import warnings
 from abc import ABC, abstractmethod
+from contextlib import ExitStack
 from pathlib import Path
 from types import MethodType
 from typing import (
@@ -16,10 +17,10 @@ from typing import (
     Literal,
 )
 from uuid import uuid4
-from weakref import proxy
 
 # Must be import first to log Pytorch output
 from comet_ml import CometExperiment, API
+from lightning.fabric.utilities.types import _PATH
 
 from petorch.utilities import b64encode
 
@@ -45,6 +46,8 @@ from lightning.pytorch.loggers import (
     NeptuneLogger,
     CometLogger as PLCometLogger,
 )
+from lightning.pytorch.plugins.io import CheckpointIO
+
 from lightning.pytorch.utilities.rank_zero import rank_zero_only
 from torch.optim import Optimizer
 from torch.utils.data import DataLoader as TorchDataLoader, default_collate
@@ -201,10 +204,14 @@ class NarutoBlipDataModule(LightningDataModule, Generic[_Batch_T]):
 
         if self.train_ratio >= 1:
             self.train_dataset = self.dataset
+            logger.info(f"Length train dataset: {len(self.train_dataset)}\n"
+                    f"Length val dataset: None")
         else:
             ds_dict = self.dataset.train_test_split(train_size=self.train_ratio)
             self.train_dataset = ds_dict["train"]
             self.val_dataset = ds_dict["test"]
+            logger.info(f"Length train dataset: {len(self.train_dataset)}\n"
+                        f"Length val dataset: {len(self.val_dataset)}")
 
     def _return_dataloader(self, dataset) -> DataLoader[_Batch_T]:
         return DataLoader(
@@ -212,6 +219,7 @@ class NarutoBlipDataModule(LightningDataModule, Generic[_Batch_T]):
             batch_size=self.batch_size,
             num_workers=self.num_workers,
             collate_fn=self._collate_fn,
+            drop_last = True
         )
 
     def train_dataloader(self) -> DataLoader[_Batch_T]:
@@ -228,54 +236,113 @@ class NarutoBlipDataModule(LightningDataModule, Generic[_Batch_T]):
         return batch.to(device=device, dtype=self.lightning_module.dtype)
 
 
-class LoraCheckpoint(ModelCheckpoint):
-    FILE_EXTENSION = ".safetensors"
+class SafetensorsCheckpointIO(CheckpointIO):
 
-    def save_state_dict(
-        self, state_dict: dict[str, torch.Tensor], trainer: pl.Trainer, filepath: str
-    ):
-        cast(pl.Trainer, trainer)
+    def save_checkpoint(self, checkpoint: dict[str, Any], path: _PATH, storage_options: Optional[Any] = None) -> None:
+        """Save model/training states as a checkpoint file through state-dump and file-write.
+
+        Args:
+            checkpoint: dict containing model and trainer state
+            path: write-target path
+            storage_options: Optional parameters when saving the model/training states.
+
+        Notes:
+            Trainer.save_checkpoint return the structure (copy from Trainer._checkpoint_connector.dump_checkpoint):
+                structured dictionary: {
+                    'epoch':                     training epoch
+                    'global_step':               training global step
+                    'pytorch-lightning_version': The version of PyTorch Lightning that produced this checkpoint
+                    'callbacks':                 "callback specific state"[] # if not weights_only
+                    'optimizer_states':          "PT optim's state_dict"[]   # if not weights_only
+                    'lr_schedulers':             "PT sched's state_dict"[]   # if not weights_only
+                    'state_dict':                Model's state_dict (e.g. network weights)
+                    precision_plugin.__class__.__qualname__:  precision plugin state_dict # if not weights_only
+                    CHECKPOINT_HYPER_PARAMS_NAME:
+                    CHECKPOINT_HYPER_PARAMS_KEY:
+                    CHECKPOINT_HYPER_PARAMS_TYPE:
+                    something_cool_i_want_to_save: anything you define through model.on_save_checkpoint
+                    LightningDataModule.__class__.__qualname__: pl DataModule's state
+                }
+            But `safetensors` only flatten Tensor. We can extract this, but for now save only state_dict.
+
+        """
+
         # Create folder
-        Path(filepath).parent.mkdir(parents=True, exist_ok=True)
-        logger.info(f"Saving Lora checkpoint: {filepath}")
+        path = str(path)
+        if not path.endswith(".safetensors"):
+            path+= ".safetensors"
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
 
-        # Save
-        byte_tensor = st.save(state_dict)
-        fs, urlpath = fsspec.core.url_to_fs(str(filepath))
+        # Save state dict only
+        byte_tensor = st.save(checkpoint["state_dict"])
+        n_params = 0
+        for param in checkpoint["state_dict"].values():
+            n_params+=param.numel()
+
+        fs, urlpath = fsspec.core.url_to_fs(path)
+        logger.info(f"Saving checkpoint (Num params={n_params:,} - File size={len(byte_tensor):,} bytes): {urlpath}")
         with fs.transaction, fs.open(urlpath, "wb") as f:
             f.write(byte_tensor)
-        # Above saving steps can be simple like this if don't care about atomic of saving.
-        # st.save_file(state_dict, filepath)
+
+    def load_checkpoint(self, path_or_file: str|Path, map_location: Optional[Any] = None) -> dict[str, Any]:
+        # Check
+        path_or_file = str(path_or_file)
+        if path_or_file.startswith("http"):
+            raise ValueError("Remote URLs not supported yet for safetensors")
+        fs,_ = fsspec.core.url_to_fs(path_or_file)
+        if not fs.exists(path_or_file):
+            raise FileNotFoundError(f"Checkpoint file not found: {path_or_file}")
+
+        # Handle fsspec-style filesystems
+        with fs.open(path_or_file, "rb") as f:
+            return st.load(f.read())  # load from bytes
+
+    def remove_checkpoint(self, path: _PATH) -> None:
+        fs,_ = fsspec.core.url_to_fs(path)
+        if fs.exists(path):
+            fs.rm(path, recursive=True)
+
+
+class AdapterOnlyCheckpoint(ModelCheckpoint):
+    FILE_EXTENSION = ".safetensors"
 
     def _save_checkpoint(self, trainer: pl.Trainer, filepath: str) -> None:
-        # Adapt to CheckpointIO of DDPStrategy.
-        if trainer.is_global_zero:
-            try:
-                state_dict = AdapterAPI.get_adapter_state_dict(trainer.lightning_module)
-                if state_dict:
-                    self.save_state_dict(state_dict, trainer, filepath)
-                    # Copy from parent
-                    self._last_global_step_saved = trainer.global_step
-                    self._last_checkpoint_saved = filepath
-                    for tl_logger in trainer.loggers:
-                        tl_logger.after_save_checkpoint(
-                            proxy(self)
-                        )  # See detail in this method for each Logger.
-                else:
-                    logger.error("Got blank lora state dict.")
+        # Adapt to `trainer.save_checkpoint(filepath, self.save_weights_only)`, which is called by the ModelCheckpoint._save_checkpoint.
+        # Does not check for rank 0, because maybe multi-rank save checkpoints. Depend on the Strategy.
 
-            except ValueError as e:
-                if "Model does not have any adapter" not in str(e):
-                    raise e
+        # Trainer.save_checkpoint check this, But we need to access model now, so just check this first.
+        if trainer.model is None:
+            raise AttributeError(
+                "Saving a checkpoint is only possible if a model is attached to the Trainer. Did you call"
+                " `Trainer.save_checkpoint()` before calling `Trainer.{fit,validate,test,predict}`?"
+            )
+
+        # Call super to save. If model does not have adapter, save raw state dict.
+        try:
+            with ExitStack() as stack:
+                # Note we check `lightning_module`, not `model`.
+                # Model is a wrapper of module with class `torch.nn.parallel.distributed.DistributedDataParallel`
+                if custom_cm:=getattr(trainer.lightning_module, "enable_custom_state_dict", None):
+                    stack.enter_context(custom_cm(AdapterAPI.get_adapter_state_dict))
+                    super()._save_checkpoint(trainer, filepath)
                 else:
-                    warnings.warn(str(e))
+                    logger.warning(f"Model {trainer.model.__class__} does not have `enable_custom_state_dict` method,"
+                                   f"so cannot save adapter only. So just skip and don't save anything.")
+        except ValueError as e:
+            if "Model does not have any adapter" in str(e):
+                logger.warning(
+                    f"Model {trainer.model.__class__} have `enable_custom_state_dict` method,"
+                    f"but does not have any adapter. So just skip and don't save anything."
+                )
+            else:
+                raise e
 
 
 class CometLogger(PLCometLogger):
 
     def __init__(
         self,
-        log_model_checkpoint: bool = True,
+        log_model_checkpoint: bool,
         checkpoint_path: str = "checkpoints", # Will be concat with dirpath_id of checkpoint model.
         encode_dirpath:bool=True,
         *,
@@ -320,12 +387,12 @@ class CometLogger(PLCometLogger):
         def _log_model(local_model_path: str)->dict:
             return comet_expr.log_model(comet_path, local_model_path, overwrite=True)
 
-        uid = uuid4()
+        uid = uuid4() # For task debug.
         cn = f"{self.__class__.__name__}-ID={uid}"
         # flushed =[]
         logger.info(
             f"{cn}: Uploading checkpoints...\n"
-            f"workspace=`{comet_expr.workspace}` - project_name=`{comet_expr.project_name}` - model_name=`{self._model_name}`"
+            f"workspace=`{comet_expr.workspace}` - project name=`{comet_expr.project_name}` - model path=`{comet_path}`"
         )
         uploaded_files = dict()
         """Id of files that just upload in this method. Keys are assetId, values are filename (excluding dir)."""
@@ -347,7 +414,7 @@ class CometLogger(PLCometLogger):
             file = path.rsplit("/", maxsplit=1)[-1]
             if file in uploaded_files.values():
                 assert path not in checkpoint_callback.best_k_models
-                logger.info(
+                logger.warning(
                     f"`last_model_path` checkpoint name `{file}` already in hold_files (be one of the best k files)."
                     f" Add postfix `_last` in filename."
                 )
@@ -358,13 +425,13 @@ class CometLogger(PLCometLogger):
             logger.info(f"Uploading `last_model_path` checkpoint: {path}")
             aid = _log_model(path)["assetId"]
             uploaded_files[aid] = file
-
+        
         # None when no running experiment, not error.
         if not (f := comet_expr.flush()) and f is not None:
             logger.error(f"{cn}: Upload checkpoint fails...")
         else:
             logger.info(
-                f"{cn}: Uploaded checkpoints: \n{pprint.pformat(uploaded_files)}"
+                f"{cn}: Uploaded checkpoints successfully: \n{pprint.pformat(uploaded_files)}"
             )
 
         # remove old models logged to experiment if they are not part of best k models at this point
@@ -378,7 +445,7 @@ class CometLogger(PLCometLogger):
             model["assetId"]: model["fileName"]
             for model in api_expr.get_model_asset_list(comet_path)
         }
-        logger.info(  # todo: change to debug
+        logger.debug(
             f"{cn}: ALl model checkpoints after uploading: \n"
             f"{pprint.pformat(all_model_files)}\n"
             f"Should hold files: \n"
@@ -405,23 +472,25 @@ class CometLogger(PLCometLogger):
                     del_ids[aid] = filename
             else:
                 remain_files[filename] = aid
-        logger.info(
-            f"Deleting checkpoints: \n"
-            f"{pprint.pformat(del_ids)}"
-        )
-        for del_id in del_ids.keys():
-            api_expr.delete_asset(del_id)
-        if not (f := comet_expr.flush()) and f is not None:
-            logger.error(f"{cn}: Delete checkpoints fails...")
-        else:
-            logger.info(f"{cn}: Deleted checkpoints successfully. ")
+        if del_ids:
+            logger.info(
+                f"Deleting old checkpoints: \n"
+                f"{pprint.pformat(del_ids)}"
+            )
+            for del_id in del_ids.keys():
+                api_expr.delete_asset(del_id)
+            if not (f := comet_expr.flush()) and f is not None:
+                logger.error(f"{cn}: Delete checkpoints fails...")
+            else:
+                logger.info(f"{cn}: Deleted checkpoints successfully. ")
+
         logger.info(f"{cn}: End uploading.")
 
 
 class OutputEvaluationCallback(Callback, ABC):
 
-    def __init__(self, *args, every_n_epoch: int, **kwargs) -> None:
-        self.every_n_epoch = every_n_epoch
+    def __init__(self, *args, every_n_epochs: int, **kwargs) -> None:
+        self.every_n_epochs = every_n_epochs
         self.gen_args = args
         self.gen_kwargs = kwargs
 
@@ -435,7 +504,7 @@ class OutputEvaluationCallback(Callback, ABC):
     def on_train_epoch_end(
         self, trainer: "pl.Trainer", pl_module: "pl.LightningModule"
     ) -> None:
-        if trainer.is_global_zero and trainer.current_epoch % self.every_n_epoch == 0:
+        if trainer.is_global_zero and trainer.current_epoch % self.every_n_epochs == 0:
             logger.info(
                 f"{self.__class__.__name__}: Generating and storing output at step={trainer.global_step}..."
             )
@@ -510,14 +579,14 @@ class ImageOutputNeptuneCallback(OutputEvaluationCallback):
 class ImageOutputCometCallback(OutputEvaluationCallback):
 
     def __init__(
-        self, *args, every_n_epoch: int = 5, comet_logger: CometLogger = None, **kwargs
+        self, *args, every_n_epochs: int = 5, comet_logger: CometLogger = None, **kwargs
     ):
         """
         Args:
             comet_logger: If None, try to find logger from Trainer.
 
         """
-        super().__init__(every_n_epoch=every_n_epoch, *args, **kwargs)
+        super().__init__(every_n_epochs=every_n_epochs, *args, **kwargs)
         self.cm_logger = comet_logger
 
     def gen_and_store_on_epoch_end(
@@ -569,13 +638,18 @@ class DebugCallback(pl.Callback):
         )
         logger.info(
             f"""
-------- Training starting ------------------------
-Training batches per epoch: {trainer.num_training_batches}
+------- Training Info------------------------
 Total training batches: {self.total_training_batches}
+Training batches per epoch: {trainer.num_training_batches}
+
+Batch size: {trainer.train_dataloader.batch_size}
+Train dataset length: {trainer.train_dataloader.dataset.__len__()}
+Validation dataset lengths: {[len(dl) for dl in trainer.val_dataloaders]}
+Validation batches during training: {trainer.num_val_batches}
+
 Gradient accumulation batch steps: {trainer.accumulate_grad_batches}
 Total optimization steps: {trainer.estimated_stepping_batches}
 Current optimization steps: {trainer.global_step - 1}
-Validation batches during training: {trainer.num_val_batches}
 --------------------------------------------------
             """
         )
@@ -648,7 +722,7 @@ def create_metric_checkpoint_callback(
     # And `save_on_train_epoch_end=True`. So that it check when `on_train_epoch_end` hook.
     # save_last is None, so only save for top k of monitor value.
     # This note save last because we not set save last, and provide monitor.
-    return LoraCheckpoint(
+    return AdapterOnlyCheckpoint(
         dirpath=checkpoints_path,
         filename=f"{{epoch}}-{{step}}-min_{{{metric}:.4f}}",
         monitor=metric,
@@ -720,7 +794,7 @@ def get_trainer(
             # see `ModelCheckpoint._save_none_monitor_checkpoint`, it will call `_save_none_monitor_checkpoint` if monitor
             # is not provide, so although we not use save_last, it still save the last each epoch.
             # Not set save_weights_only, save for everything.
-            LoraCheckpoint(
+            AdapterOnlyCheckpoint(
                 dirpath=checkpoints_path,
                 filename="{epoch}-{step}",
                 monitor="step",  # For saving top k after every epoch. Compare by `step`.
@@ -762,6 +836,7 @@ def get_trainer(
         max_epochs=max_epochs,
         num_sanity_val_steps=0,
         accumulate_grad_batches=accumulate_grad_batches,
+        plugins= SafetensorsCheckpointIO(),
         # accelerator="cpu",
         # fast_dev_run=10,
         # limit_train_batches=0.2,
@@ -806,13 +881,13 @@ if __name__ == "__main__":
     module = get_sd_module(config, adt_ckpt)
 
     # 2. Prepare data
-    data_module = NarutoBlipDataModule(batch_size=4, num_workers=32, train_ratio=0.8)
+    data_module = NarutoBlipDataModule(batch_size=4, num_workers=32, train_ratio=0.95)
 
     # 3. Prepare trainer
     pl_trainer = get_trainer(
         storage_path + PROJECT_NAME,
-        max_steps=6000,
-        save_every_n_train_steps=300,
+        max_steps=5000,
+        save_every_n_train_steps=5, # change for debug
         save_top_k=3,
         accumulate_grad_batches=4,
         addition_loggers=[
@@ -826,9 +901,9 @@ if __name__ == "__main__":
         ],
         addition_callbacks=[
             LearningRateMonitor(),
-            ImageOutputCometCallback("A beautiful girl with glasses", every_n_epochs=5),
+            ImageOutputCometCallback("A beautiful girl with glasses", every_n_epochs=3),
         ],
         log_every_n_steps=10,  # batch steps (training_step), not optimization step.
-        # debug=False,
+        debug=True,
     )
     pl_trainer.fit(module, datamodule=data_module)

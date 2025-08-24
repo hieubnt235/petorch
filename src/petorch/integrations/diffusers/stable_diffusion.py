@@ -1,3 +1,4 @@
+import contextlib
 from enum import StrEnum
 from typing import Any, Self, cast, Sequence, Callable, Iterator, Literal
 from lightning.pytorch.trainer.states import TrainerFn
@@ -316,7 +317,7 @@ class StableDiffusionModule(LightningModule):
         return torch.randn(size, dtype=self.dtype, device=self.device)
 
     def forward(self, *args: Any, **kwargs: Any) -> list[PIL.Image.Image]| np.ndarray:
-        #todo: typehint input
+        # todo: typehint input
         return self.pipeline.__call__(*args, **kwargs).images
 
     def forward_batch_loss(
@@ -332,7 +333,7 @@ class StableDiffusionModule(LightningModule):
             batch.input_ids
         )
         text_embeddings = text_encoder_output.last_hidden_state
-        
+
         unet_output: UNet2DConditionOutput = self.unet(
             sample = noisy_latents, timestep=timesteps, encoder_hidden_states=text_embeddings
         )
@@ -348,7 +349,7 @@ class StableDiffusionModule(LightningModule):
             target = self.scheduler.get_velocity(latents, noises, timesteps)
         else:
             raise RuntimeError(f"The `prediction_type`=`{pred_type}` is not supported.")
-        
+
         assert model_pred.shape == target.shape
         loss = self.loss_fn(model_pred, target)
         if not torch.isfinite(loss):
@@ -361,16 +362,43 @@ class StableDiffusionModule(LightningModule):
     def get_metric(self, key: MetricKey) -> Metric:
         return cast(Metric, self.metrics[key])
 
-    def get_lrs(self) -> dict[str, Any]:
-        # noinspection SpellCheckingInspection
-        optims = self.optimizers()
-        if not isinstance(optims, Sequence):
-            optims = [optims]
-        lrs = {}
-        for i, optim in enumerate(optims):
-            for j, pg in enumerate(optim.optimizer.param_groups):
-                lrs[f"optim_{i}-pg_{j}_lr"] = pg["lr"]
-        return lrs
+    __custom_state_dict_flag = "__custom_state_dict_flag"
+
+    @contextlib.contextmanager
+    def enable_custom_state_dict(self, state_dict_extractor: Callable[[LightningModule,...], dict[str, Tensor]] , *args, **kwargs)->Iterator[None]:
+        """
+        Context manager for changing the default `state_dict` by `custom_state_dict_extractor.
+         Intentionally for compatible the custom state dict with everything use `state_dict` api.
+        All arguments will be bypassed to self.custom_state_dict_extractor. Not that arguments must not contain LightningModule, which is
+         already passed by default. In other words, it will call state_dict_extractor(self, *args, **kwargs).
+
+        Args:
+            state_dict_extractor: First argument must be LightningModule
+            *args:
+            **kwargs:
+
+        Examples:
+            sd = AdapterAPI.get_adapter_state_dict(module)
+            with module.enable_custom_state_dict(AdapterAPI.get_adapter_state_dict):
+                sd2 = module.state_dict()
+            assert len(sd) == len(sd2)
+            for k,v in sd.items():
+                assert torch.all(sd2[k]==v)
+
+        """
+        setattr(self,self.__custom_state_dict_flag,(state_dict_extractor, args, kwargs) )
+        yield
+        delattr(self,self.__custom_state_dict_flag)
+
+    def state_dict(self, *args, destination=None, prefix="", keep_vars=False)->dict[str, Tensor]:
+        assert len(args)==0, "Not supported anymore, see nn.Module.state_dict for detail."
+        if (custom:=getattr(self,self.__custom_state_dict_flag, None)) is not None:
+            assert len(custom) == 3 and callable(custom[0])
+            return custom[0](self,*custom[1],**custom[2])
+        else:
+            return super().state_dict(
+                destination=destination, prefix=prefix, keep_vars=keep_vars
+            )
 
     # Lightning Hooks
 
