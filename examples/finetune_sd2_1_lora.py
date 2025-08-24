@@ -1,5 +1,4 @@
 import pprint
-import warnings
 from abc import ABC, abstractmethod
 from contextlib import ExitStack
 from pathlib import Path
@@ -380,6 +379,10 @@ class CometLogger(PLCometLogger):
 
     @rank_zero_only
     def after_save_checkpoint(self, checkpoint_callback: ModelCheckpoint) -> None:
+        # TODO: Current reupload all checkpoints every time be invocated.
+        #  See `alternative` part in https://github.com/Lightning-AI/pytorch-lightning/issues/16770
+        #  Can be optimized by storing some metadata, and check it to avoid reupload the same checkpoint.
+
         if not self._log_model_checkpoints:
             return
         comet_path = self._get_model_path(checkpoint_callback.dirpath)
@@ -404,7 +407,7 @@ class CometLogger(PLCometLogger):
                 file = path.rsplit("/", maxsplit=1)[-1]
 
                 assert file not in uploaded_files.values()
-                logger.info(
+                logger.debug(
                     f"Uploading `best_model_path` checkpoint with score={score.item()}: {path}"
                 )
                 aid = _log_model(path)["assetId"]
@@ -422,7 +425,7 @@ class CometLogger(PLCometLogger):
                 f += "_last"
                 file = f"{f}.{extension}"
                 assert file not in uploaded_files.values()
-            logger.info(f"Uploading `last_model_path` checkpoint: {path}")
+            logger.debug(f"Uploading `last_model_path` checkpoint: {path}")
             aid = _log_model(path)["assetId"]
             uploaded_files[aid] = file
         
@@ -474,7 +477,7 @@ class CometLogger(PLCometLogger):
                 remain_files[filename] = aid
         if del_ids:
             logger.info(
-                f"Deleting old checkpoints: \n"
+                f"Deleting old checkpoints ... \n"
                 f"{pprint.pformat(del_ids)}"
             )
             for del_id in del_ids.keys():
@@ -484,7 +487,7 @@ class CometLogger(PLCometLogger):
             else:
                 logger.info(f"{cn}: Deleted checkpoints successfully. ")
 
-        logger.info(f"{cn}: End uploading.")
+        logger.info(f"{cn}: End uploading {"~"*30}")
 
 
 class OutputEvaluationCallback(Callback, ABC):
@@ -606,7 +609,7 @@ class ImageOutputCometCallback(OutputEvaluationCallback):
             images = images if isinstance(images, Sequence) else [images]
             for i, img in enumerate(images):
                 cm_logger.experiment.log_image(
-                    img, f"output_images_step_{trainer.global_step}_i"
+                    img, f"output_images_step_{trainer.global_step}_{i}"
                 )
 
 
@@ -644,7 +647,6 @@ Training batches per epoch: {trainer.num_training_batches}
 
 Batch size: {trainer.train_dataloader.batch_size}
 Train dataset length: {trainer.train_dataloader.dataset.__len__()}
-Validation dataset lengths: {[len(dl) for dl in trainer.val_dataloaders]}
 Validation batches during training: {trainer.num_val_batches}
 
 Gradient accumulation batch steps: {trainer.accumulate_grad_batches}
@@ -887,7 +889,7 @@ if __name__ == "__main__":
     pl_trainer = get_trainer(
         storage_path + PROJECT_NAME,
         max_steps=5000,
-        save_every_n_train_steps=5, # change for debug
+        save_every_n_train_steps=120, # change for debug
         save_top_k=3,
         accumulate_grad_batches=4,
         addition_loggers=[
@@ -904,6 +906,6 @@ if __name__ == "__main__":
             ImageOutputCometCallback("A beautiful girl with glasses", every_n_epochs=3),
         ],
         log_every_n_steps=10,  # batch steps (training_step), not optimization step.
-        debug=True,
+        # debug=True,
     )
     pl_trainer.fit(module, datamodule=data_module)

@@ -1,8 +1,9 @@
 import contextlib
 from enum import StrEnum
 from typing import Any, Self, cast, Sequence, Callable, Iterator, Literal
-from lightning.pytorch.trainer.states import TrainerFn
-from torch.optim import Optimizer
+
+import PIL
+import numpy as np
 import torch
 from diffusers import (
     StableDiffusionPipeline,
@@ -15,18 +16,17 @@ from diffusers.models.autoencoders.vae import DiagonalGaussianDistribution
 from diffusers.models.unets.unet_2d_condition import UNet2DConditionOutput
 from diffusers.optimization import get_cosine_schedule_with_warmup
 from lightning import LightningModule
+from lightning.pytorch.trainer.states import TrainerFn
 from lightning.pytorch.utilities.types import (
     STEP_OUTPUT,
     OptimizerLRScheduler,
     OptimizerLRSchedulerConfig,
     LRSchedulerConfigType,
 )
-import numpy as np
-import PIL
-from petorch import logger
 from pydantic import BaseModel, ConfigDict, model_validator
 from torch import Tensor, IntTensor, FloatTensor
 from torch import nn
+from torch.optim import Optimizer
 from torchmetrics import MeanMetric, Metric
 from transformers import (
     CLIPTokenizer,
@@ -35,6 +35,8 @@ from transformers import (
     CLIPImageProcessor,
 )
 from transformers.modeling_outputs import BaseModelOutputWithPooling
+
+from petorch import logger
 
 
 class SDBatch(BaseModel):
