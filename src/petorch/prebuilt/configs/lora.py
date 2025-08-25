@@ -1,7 +1,7 @@
 from collections.abc import Callable
 from typing import Unpack
 
-from pydantic import PositiveInt, NonNegativeFloat, PositiveFloat
+from pydantic import PositiveInt, NonNegativeFloat, PositiveFloat, Field
 from torch import nn
 
 from petorch.adapter import (
@@ -29,13 +29,17 @@ MODULE_ADAPTER_CLASSES_MAP = {
     nn.Module: None,
 }
 
-
+def _all_fqn(a:str)->bool:
+    return True
+# TODO: make the filter of dispatch process become configurable for persist. Maybe define the process, and allow config that process.
 class LoraConfig(BaseModelAdaptionConfig):
     rank: PositiveInt = 8
     alpha: PositiveInt = 16
     dropout: NonNegativeFloat = 0.1
     bias: bool = False
     scale: PositiveFloat = 1.0
+
+    fqname_filter: Callable[[str], bool] = Field(default=_all_fqn)
 
     def dispatch_adapter(
         self,
@@ -49,6 +53,9 @@ class LoraConfig(BaseModelAdaptionConfig):
     ) -> BaseLoraAdapter | None:
         adapter_cls = MODULE_ADAPTER_CLASSES_MAP.get(type(base_layer), None)
 
+        if not self.fqname_filter(fqname):
+            return None
+
         if adapter_cls is not None:
             assert issubclass(adapter_cls, BaseLoraAdapter)
             adapter = adapter_cls(base_layer, self, **kwargs)
@@ -60,7 +67,7 @@ class LoraConfig(BaseModelAdaptionConfig):
             if lora_b_init_method:
                 lora_b_init_method(adapter.lora_B.weight)
                 if adapter.is_bias:
-                    lora_b_init_method(adapter.lora_B.bias)
+                    nn.init.zeros_(adapter.lora_B.bias)
             return adapter
 
         return None

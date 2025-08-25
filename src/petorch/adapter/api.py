@@ -215,11 +215,12 @@ class AdapterAPI:
     @staticmethod
     @torch.no_grad()
     def add_adapter(
-        model: nn.Module, config: BaseModelAdaptionConfig, *args, **kwargs
+        model: nn.Module, config: BaseModelAdaptionConfig, *args, activate:bool=False, **kwargs
     ) -> list[str]:
         """
         Add adapter to Pytorch model.
         Args:
+            activate: Is activate adapter. Default to False.
             model:
             config:
             args: Will be passed to **config.dispatch_layer_adapter** and **config.dispatch_adapted_layer**.
@@ -300,7 +301,7 @@ class AdapterAPI:
 
         # Modify
         for fqname, adapted_layer, adapter, is_adapted_layer in layer_collections:
-            adapted_layer._add_adapters(adapter, activate=False)
+            adapted_layer._add_adapters(adapter, activate=activate)
 
             # If a new AdaptedLayer created, swap the base layer with it.
             if not is_adapted_layer:

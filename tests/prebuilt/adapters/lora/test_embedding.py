@@ -164,7 +164,7 @@ def _make_adapter_configs(num_current_adapters: int) -> list[LoraConfig]:
 def test_lora_embedding_multi_adapters(sample, configs):
     base_layer = nn.Embedding(*emb_size)
     adapters = [
-        cast(LoraConfig, config).dispatch_adapter(fqname, base_layer)
+        cast(LoraConfig, config).dispatch_adapter(fqname, base_layer, lora_init_method=TorchInitMethod.normal)
         for config in configs
     ]
     assert None not in adapters

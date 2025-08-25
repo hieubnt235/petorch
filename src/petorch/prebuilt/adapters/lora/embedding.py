@@ -27,6 +27,11 @@ class LoraEmbedding(BaseLoraAdapter):
         self.config.bias=False # Todo: this step should be in init method for more clean in purpose of this method.
         assert not self.is_bias
 
+    def reset_parameters(self):
+        nn.init.zeros_(self.lora_A.weight)
+        nn.init.normal_(self.lora_B.weight)
+        
+
     def get_delta_weight(self) -> torch.Tensor:
         # The weight shape of nn.Embedding is (num_embeddings, embedding_dim) and forward is
         # return F.embedding(input, self.weight,...)

@@ -1,3 +1,4 @@
+import math
 import warnings
 from abc import ABC, abstractmethod
 from typing import Unpack, cast, Type
@@ -67,6 +68,8 @@ class BaseLoraAdapter(BaseAdapter, ABC):
                 f"The bias of `lora_B` should depend on the `is_bias` property."
             )
 
+        self.reset_parameters()
+
     # ---Abstract methods---
 
     @abstractmethod
@@ -85,6 +88,13 @@ class BaseLoraAdapter(BaseAdapter, ABC):
         pass
 
     # ---Optional override---
+
+    def reset_parameters(self):
+        """Override this to init weight for modules. Default is standard for Conv and Linear Lora."""
+        nn.init.kaiming_uniform_(self.lora_A.weight, a=math.sqrt(5))
+        nn.init.zeros_(self.lora_B.weight)
+        if self.is_bias:
+            nn.init.zeros_(self.lora_B.bias)
 
     def get_delta_bias(self) -> torch.Tensor | None:
         if self.is_bias:

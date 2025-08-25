@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Sequence, cast, Any, TypedDict, Type, Unpack
-from loguru import logger
+from ..utilities import logger
 import torch
 from pydantic import BaseModel, ConfigDict, Field
 from torch import nn
@@ -347,7 +347,7 @@ class BaseAdaptedLayer(nn.Module, ABC):
                     del_keys.append(key)
 
         for key in del_keys:
-            logger.debug(f"del_key: `{key}`")
+            # logger.debug(f"del_key: `{key}`")
             del state_dict[key]
 
         return state_dict
@@ -460,7 +460,7 @@ class BaseModelAdaptionConfig(BaseModel, ABC):
     2. Contain dispatch logic for construct LayerAdapter and replace it the base_layer .
     """
 
-    model_config = ConfigDict(validate_assignment=True, validate_default=True)
+    model_config = ConfigDict(validate_assignment=True, validate_default=True, arbitrary_types_allowed=True)
     adapter_name: str = Field("default")
 
     @abstractmethod
