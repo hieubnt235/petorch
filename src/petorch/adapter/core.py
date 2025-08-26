@@ -309,6 +309,8 @@ class BaseAdaptedLayer(nn.Module, ABC):
              and addition keys if exists.
 
         """
+        # todo: save adapter only one, and support load state dict with adapter name.in format {adapter_name}.lora_A
+
         if active_only and non_active_only:
             raise ValueError(
                 "`active_only` and `non_active_only` cannot be set at the same time."
@@ -394,7 +396,7 @@ class BaseAdaptedLayer(nn.Module, ABC):
             # Check that adapter state dict overrides the base layer state dict; this is unexpected behavior.
             assert k not in final_state_dict
             final_state_dict[k] = v
-            
+
         return self.load_state_dict(final_state_dict, strict=strict_load)
 
     @dataclass

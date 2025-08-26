@@ -43,6 +43,7 @@ from petorch.integrations.diffusers.stable_diffusion import (
 )
 from petorch.prebuilt.configs import LoraConfig
 from petorch.experiments.loggers import CometLogger
+from petorch.experiments.checkpoints import DefaultCheckpointIO
 
 
 model_id = "stabilityai/stable-diffusion-2-1"
@@ -320,7 +321,6 @@ class AdapterOnlyCheckpoint(ModelCheckpoint):
                 )
             else:
                 raise e
-
 
 
 class OutputEvaluationCallback(Callback, ABC):

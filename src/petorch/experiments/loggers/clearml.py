@@ -1,173 +1,173 @@
-import pprint
+import os
+import tempfile
 from argparse import Namespace
 from typing import (
     Any,
     AnyStr,
     Dict,
-    List,
     Literal,
     Optional,
     Union,
     Sequence,
-    cast,
     TYPE_CHECKING,
+    cast,
 )
-from uuid import uuid4
 
-import pandas as pd
-import torch
-from clearml import Task
 import lightning.pytorch.loggers as pl_loggers
-from lightning.pytorch.callbacks import ModelCheckpoint
+from lightning.pytorch.utilities.model_summary import summarize
 from lightning.pytorch.utilities.rank_zero import rank_zero_only
 from torch import Tensor
-
-from petorch import logger
-from petorch.utilities import b64encode
+from torch.nn import Module
+from .base import BaseLogger
 
 if TYPE_CHECKING:
-    from comet_ml import (
-        ExistingExperiment,
-        Experiment,
-        OfflineExperiment,
-        APIExperiment,
-    )
+    from clearml import Task, TaskTypes
+    from lightning import LightningModule, pytorch as pl
+    from lightning.pytorch.callbacks import ModelCheckpoint
+    from lightning import Trainer
 
 
-# https://github.com/Lightning-AI/pytorch-lightning/pull/14139
-class ClearMLLogger(pl_loggers.Logger):
-    """Log using `ClearML <https://clear.ml>`_.
-    Install it with pip:
-    .. code-block:: bash
-        pip install clearml
-    .. code-block:: python
-        from pytorch_lightning import Trainer
-        from pytorch_lightning.loggers import ClearMLLogger
-        cml_logger = ClearMLLogger(project_name="lightning-project", task_name="task-name")
-        trainer = Trainer(logger=cml_logger)
-    Use the logger anywhere in your :class:`~pytorch_lightning.core.module.LightningModule` as follows:
-    .. code-block:: python
-        from pytorch_lightning import LightningModule
-        class LitModel(LightningModule):
-            def training_step(self, batch, batch_idx):
-                # example
-                self.logger.experiment.whatever_clear_ml_supports(...)
-            def any_lightning_module_function_or_hook(self):
-                self.logger.experiment.whatever_clear_ml_supports(...)
-    Args:
-        project_name: Name of the ClearML project
-        task_name: Name of the ClearML task
-        task_id: Optional ID of an existing ClearML task to be reused.
-    Raises:
-        ModuleNotFoundError:
-            If required ClearML package is not installed on the device.
+class ClearMLLogger(BaseLogger):
     """
-    #todo: save adapter only one, and support load state dict with adapter name.in format {adapter_name}.lora_A
-    def __init__(self,
-                 task_id: Optional[str] = None,
-        project_name: Optional[str] = None,
-        task_name: Optional[str] = None,
-        tags: Optional[Sequence[str]] = None,
-        allow_archived: bool = True,
-        task_filter: Optional[dict] = None,
-):
-        super().__init__()
-        self.project_name = project_name
-        self.task_name = task_name
-        self.id = task_id
-        self._step = 0
+    References:
+        https://github.com/bmartinn/pytorch-lightning/blob/6517ca874baf31ea1ff2249b47695a9f4aee080e/pytorch_lightning/loggers/trains.py
+        https://github.com/Aleksandar1932/lightning/blob/49cad2e88a6b4787f1dd1d5d5363b8b328b828d5/src/pytorch_lightning/loggers/clearml.py
 
-        if not self.id:
-            self._initialized = True
-            self.task = Task.init(
-                project_name=self.project_name, task_name=self.task_name
+    """
+
+    def __init__(
+        self,
+        project_name: str | None = None,
+        task_name: str | None = None,
+        task_type: TaskTypes = TaskTypes.training,
+        task_id: str | None = None,
+        tags: Sequence[str] | None = None,
+        *,
+        init_new: bool = True,
+        **comet_task_kwargs
+    ):
+        """
+
+        Args:
+            project_name:
+            task_name:
+            task_type:
+            task_id: The existed task id. Only be used when `init_new` = False
+            tags:
+            init_new: If False, use Task.get_task to get the old task.
+        """
+        self._project_name = project_name
+        self._task_name = task_name
+        self._task_type = task_type
+        self._task_id = task_id
+        self._tags = tags
+        self._init_new = init_new
+        self._comet_task_kwargs = comet_task_kwargs
+
+        # This pattern adapts to some lightning loggers to ensure experiment created for all cases,
+        # such as when strategy=ddp_spawn.
+        self._task: Task | None = None
+        self._init_task()
+
+    def _init_task(self):
+        from clearml import Task
+
+        if self._init_new:
+            self._task = Task.init(
+                project_name=self._project_name,
+                task_name=self._task_name,
+                task_type=self._task_type,
+                tags=self._tags,
+                auto_connect_frameworks={"pytorch": False},
+                **self._comet_task_kwargs
             )
         else:
-            self._initialized = True
-            self.task = Task.get_task(task_id=self.id)
+            self._task = Task.get_task(
+                self._task_id,
+                self._project_name,
+                self._task_name,
+                self._tags,
+                **self._comet_task_kwargs
+            )
+
+    @property
+    def experiment(self) -> Task:
+        if self._task is None:
+            self._init_task()
+        return self._task
+
+    @property
+    def name(self) -> Optional[str]:
+        return self.experiment.name
+
+    @property
+    def version(self) -> str:
+        return self.experiment.id
 
     @rank_zero_only
     def log_metrics(
         self, metrics: Dict[str, Union[float, Tensor]], step: Optional[int] = None
     ) -> None:
-        if step is None:
-            step = self._step
-
-        def _handle_value(value: Union[float, Tensor]):
-            if isinstance(value, Tensor):
-                return value.item()
-            return value
-
+        # clearml logger.report_scalar requires value to be float or int.
         for metric, value in metrics.items():
-            self.task.logger.report_scalar(
-                title=metric, series=metric, value=_handle_value(value), iteration=step
+            self.experiment.logger.report_scalar(
+                title=metric,
+                series=metric,
+                value=value.item() if isinstance(value, Tensor) else value,
+                iteration=step,
             )
-
-        self._step += 1
 
     @rank_zero_only
     def log_hyperparams(
         self, params: Union[Dict[str, AnyStr], Namespace], *args: Any, **kwargs: Any
     ) -> None:
-        self.task.connect(params, *args, *kwargs)
+        self.experiment.connect(
+            params if isinstance(params, dict) else vars(params), *args, *kwargs
+        )
 
     @rank_zero_only
-    def log_table(
-        self,
-        key: str,
-        columns: List[str] = None,
-        data: List[List[Any]] = None,
-        dataframe: Any = None,
-        step: Optional[int] = None,
-    ) -> None:
+    def log_graph(self, model: Module, input_array: Optional[Tensor] = None) -> None:
+        with tempfile.NamedTemporaryFile("w", delete=False, suffix=".txt") as tmp:
+            tmp.write(str(summarize(cast(LightningModule, model))))
+            tmp_path = tmp.name
 
-        table: Optional[Union[pd.DataFrame, List[List[Any]]]] = None
-
-        if dataframe is not None:
-            table = dataframe
-            if columns is not None:
-                table.columns = columns
-
-        if data is not None:
-            table = data
-            assert len(columns) == len(
-                table[0]
-            ), "number of column names should match the total number of columns"
-            table.insert(0, columns)
-
-        if table is not None:
-            self.task.logger.report_table(
-                title=key, series=key, iteration=step, table_plot=table
-            )
+        self.experiment.upload_artifact("model_summary.txt", tmp_path)
+        os.remove(tmp_path)
 
     @rank_zero_only
     def finalize(
-        self, status: Literal["success", "failed", "aborted"] = "sucess"
+        self, status: Literal["success", "failed", "aborted"] = "success"
     ) -> None:
         """Finalize the experiment. Mark the task completed or otherwise given the status.
         Args:
             status: Status that the experiment finished with (e.g. success, failed, aborted)
         """
 
+        self.experiment.flush(True)
         if status == "success":
-            self.task.mark_completed()
+            self.experiment.close()  # Not use mark_complete, which will terminate the process.
         elif status == "failed":
-            self.task.mark_failed()
+            self.experiment.mark_failed()
         elif status == "aborted":
-            self.task.mark_stopped()
+            self.experiment.mark_stopped()
+        self._task = None
 
-    @property
-    def name(self) -> Optional[str]:
-        """Gets the name of the experiment, being the name of the ClearML task
-        Returns:
-            The name of the ClearML task
-        """
-        return self.task.name
+    def after_save_checkpoint(
+        self, checkpoint_callback: ModelCheckpoint, trainer: pl.Trainer, filepath: str
+    ) -> None:
+        pass
 
-    @property
-    def version(self) -> str:
-        """Gets the version of the experiment, being the ID of the ClearML task.
-        Returns:
-            The id of the ClearML task
-        """
-        return self.task.id
+    def after_remove_checkpoint(
+        self, checkpoint_callback: ModelCheckpoint, trainer: pl.Trainer, filepath: str
+    ) -> None:
+        pass
+
+    def __getstate__(self) -> Union[str, None]:
+        if self.experiment:
+            return self.experiment.id
+
+    def __setstate__(self, state: str) -> None:
+        if state:
+            self._task_id = state
+            self._init_new = False
+            self._init_task()

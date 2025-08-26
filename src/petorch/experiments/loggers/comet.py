@@ -1,5 +1,11 @@
 import pprint
-from typing import (Any, Literal, Optional, cast, TYPE_CHECKING, )
+from typing import (
+    Any,
+    Literal,
+    Optional,
+    cast,
+    TYPE_CHECKING,
+)
 from uuid import uuid4
 
 import lightning.pytorch.loggers as pl_loggers
@@ -11,8 +17,7 @@ from petorch import logger
 from petorch.utilities import b64encode
 
 if TYPE_CHECKING:
-    from comet_ml import (APIExperiment,
-    )
+    from comet_ml import APIExperiment
 
 
 class CometLogger(pl_loggers.CometLogger):
