@@ -525,7 +525,10 @@ def get_trainer(
                 break
             version += 1
     assert isinstance(version, int) and version >= 0
-    checkpoints_path = Path(checkpoints_path).joinpath(f"version_{version}").as_posix()
+    checkpoints_path = Path(checkpoints_path).joinpath(f"version_{version}").resolve().as_posix()
+    dirpath = Path(dirpath).resolve().as_posix()
+    logger.info(f"Dir path: {dirpath}")
+    logger.info(f"Checkpoint path: {checkpoints_path}")
 
     # Default callbacks
     callbacks: list[pl.Callback] = []
@@ -566,9 +569,9 @@ def get_trainer(
         kwargs["limit_val_batches"] = kwargs.get("limit_val_batches") or debug_downscale
         max_steps = debug_downscale * max_steps
         accumulate_grad_batches = 1
-        callbacks.append(DebugCallback(1, verbose=True))
-    else:
         callbacks.append(DebugCallback(10, verbose=False))
+    else:
+        callbacks.append(DebugCallback(20, verbose=False))
 
     trainer = Trainer(
         default_root_dir=dirpath,
@@ -614,7 +617,7 @@ def get_sd_module(
 
 if __name__ == "__main__":
     PROJECT_NAME = "sd_2_1"
-    storage_path = "/home/a3ilab01/petorch/storage/"
+    storage_path = "../storages/"
     adt_ckpt = None
 
     # 1. Prepare model
@@ -630,7 +633,7 @@ if __name__ == "__main__":
     pl_trainer = get_trainer(
         storage_path + PROJECT_NAME,
         max_steps=5000,
-        save_every_n_train_steps=120,  # change for debug
+        save_every_n_train_steps=5,  # change 5 for debug
         save_top_k=3,
         accumulate_grad_batches=4,
         addition_loggers=[
@@ -644,9 +647,9 @@ if __name__ == "__main__":
         ],
         addition_callbacks=[
             LearningRateMonitor(),
-            ImageOutputCometCallback("A beautiful girl with glasses", every_n_epochs=3),
+            ImageOutputCometCallback("A girl with yellow hair in hoodie", every_n_epochs=3),
         ],
         log_every_n_steps=10,  # batch steps (training_step), not optimization step.
-        # debug=True,
+        debug=True,
     )
     pl_trainer.fit(module, datamodule=data_module)

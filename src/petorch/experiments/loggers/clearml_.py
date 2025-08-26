@@ -13,7 +13,6 @@ from typing import (
     cast,
 )
 
-import lightning.pytorch.loggers as pl_loggers
 from lightning.pytorch.utilities.model_summary import summarize
 from lightning.pytorch.utilities.rank_zero import rank_zero_only
 from torch import Tensor
@@ -26,7 +25,7 @@ if TYPE_CHECKING:
     from lightning.pytorch.callbacks import ModelCheckpoint
     from lightning import Trainer
 
-
+TaskT: type["Task"] = "Task"
 class ClearMLLogger(BaseLogger):
     """
     References:
@@ -39,7 +38,7 @@ class ClearMLLogger(BaseLogger):
         self,
         project_name: str | None = None,
         task_name: str | None = None,
-        task_type: TaskTypes = TaskTypes.training,
+        task_type: "TaskTypes" = "TaskTypes.training",
         task_id: str | None = None,
         tags: Sequence[str] | None = None,
         *,
@@ -66,7 +65,7 @@ class ClearMLLogger(BaseLogger):
 
         # This pattern adapts to some lightning loggers to ensure experiment created for all cases,
         # such as when strategy=ddp_spawn.
-        self._task: Task | None = None
+        self._task: TaskT | None = None
         self._init_task()
 
     def _init_task(self):
@@ -91,7 +90,7 @@ class ClearMLLogger(BaseLogger):
             )
 
     @property
-    def experiment(self) -> Task:
+    def experiment(self) -> "Task":
         if self._task is None:
             self._init_task()
         return self._task
@@ -153,12 +152,12 @@ class ClearMLLogger(BaseLogger):
         self._task = None
 
     def after_save_checkpoint(
-        self, checkpoint_callback: ModelCheckpoint, trainer: pl.Trainer, filepath: str
+        self, checkpoint_callback: "ModelCheckpoint", trainer: "pl.Trainer", filepath: str
     ) -> None:
         pass
 
     def after_remove_checkpoint(
-        self, checkpoint_callback: ModelCheckpoint, trainer: pl.Trainer, filepath: str
+        self, checkpoint_callback: "ModelCheckpoint", trainer: "pl.Trainer", filepath: str
     ) -> None:
         pass
 

@@ -58,7 +58,7 @@ class CometLogger(pl_loggers.CometLogger):
         self._api_expr = None
 
     @property
-    def api_experiment(self) -> APIExperiment:
+    def api_experiment(self) -> "APIExperiment":
         if self._api_expr is None:
             from comet_ml import API
 

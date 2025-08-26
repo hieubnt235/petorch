@@ -114,6 +114,8 @@ class ModelCheckpoint(pl_callbacks.ModelCheckpoint):
                 assert callable(self._state_dict_extractor)
                 org_state_dict = module.state_dict
                 module.state_dict = MethodType(self._state_dict_extractor, module)
+                logger.debug(f"Original statedict = {type(org_state_dict)}")
+                logger.debug(f"module.state_dict type = {type(module.state_dict)}")
             yield
         finally:
             if org_state_dict is not None:
@@ -128,7 +130,7 @@ class ModelCheckpoint(pl_callbacks.ModelCheckpoint):
                 "Saving a checkpoint is only possible if a model is attached to the Trainer. Did you call"
                 " `Trainer.save_checkpoint()` before calling `Trainer.{fit,validate,test,predict}`?"
             )
-        with self._patch_pl_state_dict(trainer.model):
+        with self._patch_pl_state_dict(trainer.lightning_module):
             trainer.save_checkpoint(
                 filepath,
                 self.save_weights_only,
@@ -157,8 +159,7 @@ def torch_save_checkpoint(checkpoint: dict[str, Any], path: str):
         f.write(buffer.getvalue())
 
 
-def torch_load_checkpoint(
-    self, path: _PATH, map_location: Optional[Any] = None
+def torch_load_checkpoint(path: _PATH, map_location: Optional[Any] = None
 ) -> dict[str, Any]:
     return _load(path, map_location)
 
@@ -232,9 +233,9 @@ class DefaultCheckpointIO(PLCheckpointIO):
         fs.makedirs(os.path.dirname(path), exist_ok=True)
 
         if path.endswith(".safetensors"):
-            safe_save_checkpoint(checkpoint["state_dict"])
+            safe_save_checkpoint(checkpoint["state_dict"], path)
         else:
-            torch_save_checkpoint(checkpoint)
+            torch_save_checkpoint(checkpoint, path)
 
     def load_checkpoint(
         self, path: _PATH, map_location: Optional[Any] = None
@@ -244,7 +245,7 @@ class DefaultCheckpointIO(PLCheckpointIO):
             raise FileNotFoundError(f"Checkpoint file not found: {path}")
 
         if str(path).endswith(".safetensors"):
-            return safe_load_checkpoint(path, map_location)
+            return safe_load_checkpoint(path, map_location=map_location)
         else:
             return torch_load_checkpoint(path, map_location=map_location)
 
