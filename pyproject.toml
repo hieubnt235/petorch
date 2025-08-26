@@ -18,6 +18,7 @@ dependencies = [
     "accelerate>=1.8.1",
     "bitsandbytes>=0.46.1",
     "black>=25.1.0",
+    "clearml>=2.0.2",
     "comet-ml>=3.51.0",
     "datasets>=4.0.0",
     "diffusers>=0.34.0",

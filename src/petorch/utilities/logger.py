@@ -4,12 +4,12 @@ import os
 import sys
 
 import loguru
-from loguru import logger
 
+logger = loguru.logger
 
 class InterceptHandler(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
-        # Get corresponding Loguru level if it exists.
+        # Get the corresponding Loguru level if it exists.
         level: str | int
         try:
             level = logger.level(record.levelname).name
@@ -48,7 +48,6 @@ DEFAULT_LOGGER_FORMAT = ("<green><b>[{time:YYYY-MM-DD HH:mm:ss.SSS}]</b></green>
                          )
 def setup_logger(level=None):
     level = level or os.getenv("LOG_LEVEL","INFO")
-
     def log_filter(record: "loguru.Record") -> bool:
         name = record.get("name")
         level_no = record["level"].no

@@ -1,6 +1,7 @@
 from enum import Enum
 from .modules import *
 from .func import *
+from .logger import logger
 
 from torch.nn.init import (
     normal_,
