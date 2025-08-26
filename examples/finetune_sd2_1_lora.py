@@ -1,17 +1,23 @@
 from abc import ABC, abstractmethod
-from contextlib import ExitStack
 from pathlib import Path
 from types import MethodType
-from typing import (Callable, TypeVar, cast, Type, Generic, Iterator, Sequence, Any, Optional, )
+from typing import (
+    Callable,
+    TypeVar,
+    cast,
+    Type,
+    Generic,
+    Iterator,
+    Sequence,
+    Any,
+)
 
 # Must be import first to log Pytorch output
 from comet_ml import CometExperiment
-from lightning.fabric.utilities.types import _PATH
 
 # Dummy usage for not reorder during reformat file.
 cast(type, CometExperiment)
 
-import fsspec
 import lightning as pl
 import safetensors.torch as st
 import torch
@@ -19,7 +25,6 @@ import torchvision.transforms.v2 as transforms
 from datasets import load_dataset, Dataset as ArrDataset
 from lightning import LightningDataModule, Trainer, Callback
 from lightning.pytorch.callbacks import (
-    ModelCheckpoint,
     TQDMProgressBar,
     ModelSummary,
     LearningRateMonitor,
@@ -27,8 +32,8 @@ from lightning.pytorch.callbacks import (
 from lightning.pytorch.loggers import (
     WandbLogger,
     Logger,
-    NeptuneLogger, )
-from lightning.pytorch.plugins.io import CheckpointIO
+    NeptuneLogger,
+)
 
 from lightning.pytorch.utilities.rank_zero import rank_zero_only
 from torch.optim import Optimizer
@@ -43,8 +48,7 @@ from petorch.integrations.diffusers.stable_diffusion import (
 )
 from petorch.prebuilt.configs import LoraConfig
 from petorch.experiments.loggers import CometLogger
-from petorch.experiments.checkpoints import DefaultCheckpointIO
-
+from petorch.experiments.checkpoints import ModelCheckpoint, DefaultCheckpointIO
 
 model_id = "stabilityai/stable-diffusion-2-1"
 
@@ -189,14 +193,18 @@ class NarutoBlipDataModule(LightningDataModule, Generic[_Batch_T]):
 
         if self.train_ratio >= 1:
             self.train_dataset = self.dataset
-            logger.info(f"Length train dataset: {len(self.train_dataset)}\n"
-                    f"Length val dataset: None")
+            logger.info(
+                f"Length train dataset: {len(self.train_dataset)}\n"
+                f"Length val dataset: None"
+            )
         else:
             ds_dict = self.dataset.train_test_split(train_size=self.train_ratio)
             self.train_dataset = ds_dict["train"]
             self.val_dataset = ds_dict["test"]
-            logger.info(f"Length train dataset: {len(self.train_dataset)}\n"
-                        f"Length val dataset: {len(self.val_dataset)}")
+            logger.info(
+                f"Length train dataset: {len(self.train_dataset)}\n"
+                f"Length val dataset: {len(self.val_dataset)}"
+            )
 
     def _return_dataloader(self, dataset) -> DataLoader[_Batch_T]:
         return DataLoader(
@@ -204,7 +212,7 @@ class NarutoBlipDataModule(LightningDataModule, Generic[_Batch_T]):
             batch_size=self.batch_size,
             num_workers=self.num_workers,
             collate_fn=self._collate_fn,
-            drop_last = True
+            drop_last=True,
         )
 
     def train_dataloader(self) -> DataLoader[_Batch_T]:
@@ -455,7 +463,7 @@ def create_metric_checkpoint_callback(
     # And `save_on_train_epoch_end=True`. So that it check when `on_train_epoch_end` hook.
     # save_last is None, so only save for top k of monitor value.
     # This note save last because we not set save last, and provide monitor.
-    return AdapterOnlyCheckpoint(
+    return ModelCheckpoint(
         dirpath=checkpoints_path,
         filename=f"{{epoch}}-{{step}}-min_{{{metric}:.4f}}",
         monitor=metric,
@@ -527,7 +535,7 @@ def get_trainer(
             # see `ModelCheckpoint._save_none_monitor_checkpoint`, it will call `_save_none_monitor_checkpoint` if monitor
             # is not provide, so although we not use save_last, it still save the last each epoch.
             # Not set save_weights_only, save for everything.
-            AdapterOnlyCheckpoint(
+            ModelCheckpoint(
                 dirpath=checkpoints_path,
                 filename="{epoch}-{step}",
                 monitor="step",  # For saving top k after every epoch. Compare by `step`.
@@ -536,7 +544,9 @@ def get_trainer(
                 every_n_epochs=save_every_n_epochs,
                 every_n_train_steps=save_every_n_train_steps,
                 save_on_train_epoch_end=True,
-                verbose= debug
+                verbose=debug,
+                module_state_dict_extractor=AdapterAPI.get_adapter_state_dict,
+                file_extension=".safetensors",
             ),
             TQDMProgressBar(leave=True),
             ModelSummary(max_depth=1),
@@ -569,7 +579,7 @@ def get_trainer(
         max_epochs=max_epochs,
         num_sanity_val_steps=0,
         accumulate_grad_batches=accumulate_grad_batches,
-        plugins= SafetensorsCheckpointIO(),
+        plugins=DefaultCheckpointIO(),
         # accelerator="cpu",
         # fast_dev_run=10,
         # limit_train_batches=0.2,
@@ -620,7 +630,7 @@ if __name__ == "__main__":
     pl_trainer = get_trainer(
         storage_path + PROJECT_NAME,
         max_steps=5000,
-        save_every_n_train_steps=120, # change for debug
+        save_every_n_train_steps=120,  # change for debug
         save_top_k=3,
         accumulate_grad_batches=4,
         addition_loggers=[
