@@ -81,6 +81,9 @@ class ModelCheckpoint(pl_callbacks.ModelCheckpoint):
             storage_options: This will be passed to CheckpointIO, and you can customize the logic of saving depends on this.
              Useful for the case you save multiple checkpoints, and they have different expected storage.
              If `True` or given any object, pass the `locals()` of the `_save_checkpoint` method.
+             
+            Notes:
+                `storage_options` must be False or None if the training strategy is not DDP or SingleDevice, or will raise an error.
 
             file_extension: Override the FILE_EXTENSION. The DefaultCheckpointIO will check if it is '.safetensors'. Then using save load.
         """
@@ -197,7 +200,11 @@ def remove_checkpoint(path: _PATH) -> None:
 
 
 class DefaultCheckpointIO(PLCheckpointIO):
-
+    """
+    Notes:
+        CheckpointIO only be use if train strategy is DDP or SingleDevice.
+    """
+    
     def save_checkpoint(
         self,
         checkpoint: dict[str, Any],

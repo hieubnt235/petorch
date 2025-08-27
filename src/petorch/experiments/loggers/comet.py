@@ -18,6 +18,7 @@ from petorch.utilities import b64encode
 
 if TYPE_CHECKING:
     from comet_ml import APIExperiment
+    cast(APIExperiment,5) # Fake use
 
 
 class CometLogger(pl_loggers.CometLogger):

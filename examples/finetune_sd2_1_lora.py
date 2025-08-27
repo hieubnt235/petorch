@@ -525,7 +525,9 @@ def get_trainer(
                 break
             version += 1
     assert isinstance(version, int) and version >= 0
-    checkpoints_path = Path(checkpoints_path).joinpath(f"version_{version}").resolve().as_posix()
+    checkpoints_path = (
+        Path(checkpoints_path).joinpath(f"version_{version}").resolve().as_posix()
+    )
     dirpath = Path(dirpath).resolve().as_posix()
     logger.info(f"Dir path: {dirpath}")
     logger.info(f"Checkpoint path: {checkpoints_path}")
@@ -647,7 +649,9 @@ if __name__ == "__main__":
         ],
         addition_callbacks=[
             LearningRateMonitor(),
-            ImageOutputCometCallback("A girl with yellow hair in hoodie", every_n_epochs=3),
+            ImageOutputCometCallback(
+                "A girl with yellow hair in hoodie", every_n_epochs=3
+            ),
         ],
         log_every_n_steps=10,  # batch steps (training_step), not optimization step.
         debug=True,
