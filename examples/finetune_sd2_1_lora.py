@@ -30,9 +30,9 @@ from torch.utils.data import DataLoader as TorchDataLoader, default_collate
 from transformers import CLIPTokenizerFast, PreTrainedTokenizerBase
 
 from petorch import AdapterAPI, logger
-from petorch.experiments.callbacks.output_eval import ImageOutputClearmlCallback
+from petorch.experiments.callbacks.debugger import ClearmlImageDebugger
 from petorch.experiments.checkpoints import ModelCheckpoint, DefaultCheckpointIO
-from petorch.experiments.loggers import CometLogger
+from petorch.experiments.loggers import ClearmlLogger
 from petorch.integrations.diffusers.stable_diffusion import (
     StableDiffusionModule,
     SDBatch,
@@ -502,22 +502,23 @@ if __name__ == "__main__":
     pl_trainer = get_trainer(
         storage_path + PROJECT_NAME,
         max_steps=5000,
-        save_every_n_train_steps=5,  # change 5 for debug
+        # save_every_n_train_steps=10,  # change 5 or 10 for debug, train batch step, not optimization step
+        save_every_n_epochs=1,
         save_top_k=3,
         accumulate_grad_batches=4,
         addition_loggers=[
-            CometLogger(
+            ClearmlLogger(
                 log_model_checkpoint=True,
                 checkpoint_path="checkpoints",
-                workspace="hieubnt235",
-                project=PROJECT_NAME,
-                name="naruto_blip_lora_r16",
+                project_name=PROJECT_NAME,
+                task_name="naruto_blip_lora_r16_test",
+                output_uri="https://files.clear.ml"
             )
         ],
         addition_callbacks=[
             LearningRateMonitor(),
-            ImageOutputClearmlCallback(
-                "A girl with yellow hair in hoodie", every_n_epochs=3
+            ClearmlImageDebugger(
+                "A girl with yellow hair in hoodie", every_n_epochs=1
             ),
         ],
         log_every_n_steps=10,  # batch steps (training_step), not optimization step.

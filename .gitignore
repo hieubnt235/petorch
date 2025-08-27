@@ -1,5 +1,5 @@
 __pycache__/
 /src/petorch.egg-info/
 .idea/
-/storage/
+/storages/
 /wandb/
