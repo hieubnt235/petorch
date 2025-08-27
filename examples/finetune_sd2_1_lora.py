@@ -1,4 +1,3 @@
-from abc import ABC, abstractmethod
 from pathlib import Path
 from types import MethodType
 from typing import (
@@ -12,12 +11,6 @@ from typing import (
     Any,
 )
 
-# Must be import first to log Pytorch output
-from comet_ml import CometExperiment
-
-# Dummy usage for not reorder during reformat file.
-cast(type, CometExperiment)
-
 import lightning as pl
 import safetensors.torch as st
 import torch
@@ -30,25 +23,22 @@ from lightning.pytorch.callbacks import (
     LearningRateMonitor,
 )
 from lightning.pytorch.loggers import (
-    WandbLogger,
     Logger,
-    NeptuneLogger,
 )
-
-from lightning.pytorch.utilities.rank_zero import rank_zero_only
 from torch.optim import Optimizer
 from torch.utils.data import DataLoader as TorchDataLoader, default_collate
 from transformers import CLIPTokenizerFast, PreTrainedTokenizerBase
 
 from petorch import AdapterAPI, logger
+from petorch.experiments.callbacks.output_eval import ImageOutputClearmlCallback
+from petorch.experiments.checkpoints import ModelCheckpoint, DefaultCheckpointIO
+from petorch.experiments.loggers import CometLogger
 from petorch.integrations.diffusers.stable_diffusion import (
     StableDiffusionModule,
     SDBatch,
     MetricKey,
 )
 from petorch.prebuilt.configs import LoraConfig
-from petorch.experiments.loggers import CometLogger
-from petorch.experiments.checkpoints import ModelCheckpoint, DefaultCheckpointIO
 
 model_id = "stabilityai/stable-diffusion-2-1"
 
@@ -227,129 +217,6 @@ class NarutoBlipDataModule(LightningDataModule, Generic[_Batch_T]):
         self, batch: SDBatch, device: torch.device, dataloader_idx: int
     ) -> SDBatch:
         return batch.to(device=device, dtype=self.lightning_module.dtype)
-
-
-class OutputEvaluationCallback(Callback, ABC):
-
-    def __init__(self, *args, every_n_epochs: int, **kwargs) -> None:
-        self.every_n_epochs = every_n_epochs
-        self.gen_args = args
-        self.gen_kwargs = kwargs
-
-    @abstractmethod
-    def gen_and_store_on_epoch_end(
-        self, trainer: "pl.Trainer", pl_module: "pl.LightningModule", *args, **kwargs
-    ) -> None:
-        pass
-
-    @rank_zero_only
-    def on_train_epoch_end(
-        self, trainer: "pl.Trainer", pl_module: "pl.LightningModule"
-    ) -> None:
-        if trainer.is_global_zero and trainer.current_epoch % self.every_n_epochs == 0:
-            logger.info(
-                f"{self.__class__.__name__}: Generating and storing output at step={trainer.global_step}..."
-            )
-            with torch.no_grad():
-                self.gen_and_store_on_epoch_end(
-                    trainer, pl_module, *self.gen_args, **self.gen_kwargs
-                )
-
-
-class ImageOutputWandbCallback(OutputEvaluationCallback):
-
-    def __init__(
-        self, *args, every_n_epoch: int = 5, wandb_logger: WandbLogger = None, **kwargs
-    ):
-        """
-        Args:
-            wandb_logger: If None, try to find logger from Trainer.
-
-        """
-        super().__init__(every_n_epoch=every_n_epoch, *args, **kwargs)
-        self.wdb_logger = wandb_logger
-
-    def gen_and_store_on_epoch_end(
-        self, trainer: "pl.Trainer", pl_module: "pl.LightningModule", *args, **kwargs
-    ) -> None:
-        wdb_logger = self.wdb_logger
-        if wdb_logger is None:
-            for pl_logger in trainer.loggers:
-                if isinstance(pl_logger, WandbLogger):
-                    wdb_logger = pl_logger
-                    break
-
-        if wdb_logger is not None:
-            assert isinstance(wdb_logger, WandbLogger)
-            images = pl_module.forward(*args, **kwargs)
-            wdb_logger.log_image(f"images_step_{trainer.global_step}", images)
-
-
-class ImageOutputNeptuneCallback(OutputEvaluationCallback):
-
-    def __init__(
-        self,
-        *args,
-        every_n_epoch: int = 5,
-        neptune_logger: NeptuneLogger = None,
-        **kwargs,
-    ):
-        """
-        Args:
-            neptune_logger: If None, try to find logger from Trainer.
-
-        """
-        super().__init__(every_n_epoch=every_n_epoch, *args, **kwargs)
-        self.nt_logger = neptune_logger
-
-    def gen_and_store_on_epoch_end(
-        self, trainer: "pl.Trainer", pl_module: "pl.LightningModule", *args, **kwargs
-    ) -> None:
-        nt_logger = self.nt_logger
-        if nt_logger is None:
-            for pl_logger in trainer.loggers:
-                if isinstance(pl_logger, NeptuneLogger):
-                    nt_logger = pl_logger
-                    break
-
-        if nt_logger is not None:
-            assert isinstance(nt_logger, NeptuneLogger)
-            images = pl_module.forward(*args, **kwargs)
-            nt_logger.experiment[f"output_images/step_{trainer.global_step}"] = images
-
-
-class ImageOutputCometCallback(OutputEvaluationCallback):
-
-    def __init__(
-        self, *args, every_n_epochs: int = 5, comet_logger: CometLogger = None, **kwargs
-    ):
-        """
-        Args:
-            comet_logger: If None, try to find logger from Trainer.
-
-        """
-        super().__init__(every_n_epochs=every_n_epochs, *args, **kwargs)
-        self.cm_logger = comet_logger
-
-    def gen_and_store_on_epoch_end(
-        self, trainer: "pl.Trainer", pl_module: "pl.LightningModule", *args, **kwargs
-    ) -> None:
-        cm_logger = self.cm_logger
-        if cm_logger is None:
-            for pl_logger in trainer.loggers:
-                if isinstance(pl_logger, CometLogger):
-                    cm_logger = pl_logger
-                    break
-
-        if cm_logger is not None:
-            assert isinstance(cm_logger, CometLogger)
-
-            images = pl_module.forward(*args, **kwargs)
-            images = images if isinstance(images, Sequence) else [images]
-            for i, img in enumerate(images):
-                cm_logger.experiment.log_image(
-                    img, f"output_images_step_{trainer.global_step}_{i}"
-                )
 
 
 class DebugCallback(pl.Callback):
@@ -649,7 +516,7 @@ if __name__ == "__main__":
         ],
         addition_callbacks=[
             LearningRateMonitor(),
-            ImageOutputCometCallback(
+            ImageOutputClearmlCallback(
                 "A girl with yellow hair in hoodie", every_n_epochs=3
             ),
         ],

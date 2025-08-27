@@ -33,7 +33,7 @@ Task = cml.Task
 TaskTypes = cml.TaskTypes
 
 
-class ClearMLLogger(BaseLogger):
+class ClearmlLogger(BaseLogger):
     """
     References:
         https://github.com/bmartinn/pytorch-lightning/blob/6517ca874baf31ea1ff2249b47695a9f4aee080e/pytorch_lightning/loggers/trains.py
