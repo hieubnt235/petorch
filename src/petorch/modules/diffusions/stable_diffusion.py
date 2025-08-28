@@ -609,7 +609,7 @@ class StableDiffusionDataModule(LightningDataModule, Generic[_Batch_T]):
             input_ids=self.text_transform(sample["text"]),
         )
 
-    def setup(self, stage: str = None) -> None:
+    def setup(self, stage: str = TrainerFn.FITTING) -> None:
         """This is call by Trainer, if you call manually, make sure it does not have any process access to self.Trainer,
          such as auto find for resize sample (see `_setup_transforms`), means that if you pass your custom resize, it will run well.
         """
