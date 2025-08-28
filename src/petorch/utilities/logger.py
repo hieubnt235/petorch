@@ -2,14 +2,14 @@ import inspect
 import logging
 import os
 import sys
-
+from tqdm import tqdm
 import loguru
-from loguru import logger
 
+logger = loguru.logger
 
 class InterceptHandler(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
-        # Get corresponding Loguru level if it exists.
+        # Get the corresponding Loguru level if it exists.
         level: str | int
         try:
             level = logger.level(record.levelname).name
@@ -17,7 +17,10 @@ class InterceptHandler(logging.Handler):
             level = record.levelno
 
         frame, depth = inspect.currentframe(), 0
-        while frame and (depth == 0 or frame.f_code.co_filename == logging.__file__):
+        while frame and (
+                frame.f_code.co_filename == logging.__file__
+                or frame.f_code.co_filename == __file__
+        ):
             frame = frame.f_back
             depth += 1
 
@@ -25,33 +28,50 @@ class InterceptHandler(logging.Handler):
             level, record.getMessage()
         )
 
-logger_info_set = ["lightning.pytorch"]
-logger_debug_set = ["__main__", "petorch"]
+
+logger_info_set = ["lightning", "clearml"]
+"""Allow all logs with info level from these module are logged."""
+
+logger_debug_set = [__name__,"__main__", "petorch"]
+"""Allow all logs with info level from these module are logged."""
+
+logger_modules_to_setup = ["lightning","transformers", "diffusers", "torch"]
+"""Loggers will be setup manually. If not in debug or info set, the default is warning level.
+The modules were chosen in info or debug set, must be append in this set, to refresh every setup.
+"""
 
 def is_info_logger(name: str):
-    for l in logger_info_set:
-        if l in name:
-            return True
-    return False
+    names = name.split(".")
+    return any(l in names for l in logger_info_set)
 
 
 def is_debug_logger(name: str):
-    for l in logger_debug_set:
-        if l in name:
-            return True
-    return False
+    names = name.split(".")
+    return any(l in names for l in logger_debug_set)
+
+def setup_module_logger(logger_name:str):
+    logger_ = logging.getLogger(logger_name)
+    logger_.handlers.clear()
+    logger_.setLevel(logging.DEBUG)
+    # Add our handler so lightning logs are sent to Loguru
+    logger_.addHandler(InterceptHandler())
+    # CRITICAL: Stop lightning logs from reaching the root logger
+    logger_.propagate = False
+    # logging.basicConfig(handlers=[InterceptHandler()], level=logging.NOTSET, force=True)
+
 
 DEFAULT_LOGGER_FORMAT = ("<green><b>[{time:YYYY-MM-DD HH:mm:ss.SSS}]</b></green> "
                          "<level>[PID {process.id} | {level: <8}]</level> "
-                         "<cyan><i>{name}:{function}:{line}</i></cyan> "
-                         "<level> :~ {message}</level>"
+                         "<cyan><i>{name}:{function}:{line} :~ </i></cyan> "
+                         "<level>{message}</level>"
                          )
 def setup_logger(level=None):
     level = level or os.getenv("LOG_LEVEL","INFO")
-
     def log_filter(record: "loguru.Record") -> bool:
         name = record.get("name")
         level_no = record["level"].no
+        # print(f"FILTER CHECK --- Name: '{name}', Level: '{record["level"].name}'")
+
         if name:
             if is_info_logger(name):
                 return level_no >= logger.level("INFO").no
@@ -62,13 +82,30 @@ def setup_logger(level=None):
         # Does not have a name, or name is not prespecified
         return level_no >= logger.level("WARNING").no
 
-    logging.basicConfig(handlers=[InterceptHandler()], level=logging.NOTSET, force=True)
+    logging.root.handlers = [InterceptHandler()]
+    logging.root.setLevel(logging.DEBUG)
+
+    for parent_name in logger_modules_to_setup:
+        # Find and configure all existing child loggers
+        for logger_name in list(logging.root.manager.loggerDict.keys()):
+            if logger_name.startswith(parent_name):
+                setup_module_logger(logger_name)
+        # Also configure the parent logger itself to catch any future children
+        setup_module_logger(parent_name)
+
     logger.remove()
+    # logger.add(
+    #     sys.stderr,
+    #     level=level,
+    #     filter=log_filter,
+    #     format=DEFAULT_LOGGER_FORMAT
+    # )
     logger.add(
-        sys.stderr,
+        lambda msg: tqdm.write(msg, end=""),
         level=level,
-        filter=log_filter,
-        format=DEFAULT_LOGGER_FORMAT
+        filter = log_filter,
+        format=DEFAULT_LOGGER_FORMAT,
+        colorize=True
     )
     logger.info(f"Log level is set to `{level}`.")
     return logger

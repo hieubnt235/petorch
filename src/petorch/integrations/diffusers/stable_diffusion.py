@@ -1,39 +1,23 @@
-import contextlib
 from enum import StrEnum
 from typing import Any, Self, cast, Sequence, Callable, Iterator, Literal
 
 import PIL
 import numpy as np
 import torch
-from diffusers import (
-    StableDiffusionPipeline,
-    AutoencoderKL,
-    UNet2DConditionModel,
-    DDIMScheduler,
-    DDPMScheduler,
-)
+from diffusers import (StableDiffusionPipeline, AutoencoderKL, UNet2DConditionModel, DDIMScheduler, DDPMScheduler, )
 from diffusers.models.autoencoders.vae import DiagonalGaussianDistribution
 from diffusers.models.unets.unet_2d_condition import UNet2DConditionOutput
 from diffusers.optimization import get_cosine_schedule_with_warmup
 from lightning import LightningModule
 from lightning.pytorch.trainer.states import TrainerFn
-from lightning.pytorch.utilities.types import (
-    STEP_OUTPUT,
-    OptimizerLRScheduler,
-    OptimizerLRSchedulerConfig,
-    LRSchedulerConfigType,
-)
+from lightning.pytorch.utilities.types import (STEP_OUTPUT, OptimizerLRScheduler, OptimizerLRSchedulerConfig,
+                                               LRSchedulerConfigType, )
 from pydantic import BaseModel, ConfigDict, model_validator
 from torch import Tensor, IntTensor, FloatTensor
 from torch import nn
 from torch.optim import Optimizer
 from torchmetrics import MeanMetric, Metric
-from transformers import (
-    CLIPTokenizer,
-    CLIPTextModel,
-    CLIPTokenizerFast,
-    CLIPImageProcessor,
-)
+from transformers import (CLIPTokenizer, CLIPTextModel, CLIPTokenizerFast, CLIPImageProcessor, )
 from transformers.modeling_outputs import BaseModelOutputWithPooling
 
 from petorch import logger
@@ -172,9 +156,7 @@ class StableDiffusionModule(LightningModule):
         unet: UNet2DConditionModel | None = None,
         text_encoder: CLIPTextModel | None = None,
         tokenizer: CLIPTokenizer | CLIPTokenizerFast | None = None,
-        scheduler: (
-            DDIMScheduler | DDPMScheduler | None
-        ) = None,
+        scheduler: DDIMScheduler | DDPMScheduler | None = None,
         feature_extractor: CLIPImageProcessor | None = None,
         optimizer_factory: None | OptimizerFactoryType = None,
         lr_scheduler_factory: None | LRSchedulerFactoryType = None,
@@ -297,7 +279,7 @@ class StableDiffusionModule(LightningModule):
     def vae_encode(self, images: torch.Tensor) -> torch.Tensor:
         latent_dist: DiagonalGaussianDistribution = self.vae.encode(images).latent_dist
         latents = latent_dist.sample() * self.latents_values_scaling
-        return latents.to(device = self.device, dtype = self.dtype)
+        return latents.to(device=self.device, dtype=self.dtype)
 
     def vae_decode(self, latents: Tensor) -> torch.Tensor:
         return self.vae.decode(
@@ -318,7 +300,7 @@ class StableDiffusionModule(LightningModule):
     def create_noises(self, size: Sequence[int]):
         return torch.randn(size, dtype=self.dtype, device=self.device)
 
-    def forward(self, *args: Any, **kwargs: Any) -> list[PIL.Image.Image]| np.ndarray:
+    def forward(self, *args: Any, **kwargs: Any) -> list[PIL.Image.Image] | np.ndarray:
         # todo: typehint input
         return self.pipeline.__call__(*args, **kwargs).images
 
@@ -337,7 +319,9 @@ class StableDiffusionModule(LightningModule):
         text_embeddings = text_encoder_output.last_hidden_state
 
         unet_output: UNet2DConditionOutput = self.unet(
-            sample = noisy_latents, timestep=timesteps, encoder_hidden_states=text_embeddings
+            sample=noisy_latents,
+            timestep=timesteps,
+            encoder_hidden_states=text_embeddings,
         )
         model_pred = unet_output.sample
 
@@ -364,44 +348,6 @@ class StableDiffusionModule(LightningModule):
     def get_metric(self, key: MetricKey) -> Metric:
         return cast(Metric, self.metrics[key])
 
-    __custom_state_dict_flag = "__custom_state_dict_flag"
-
-    @contextlib.contextmanager
-    def enable_custom_state_dict(self, state_dict_extractor: Callable[[LightningModule,...], dict[str, Tensor]] , *args, **kwargs)->Iterator[None]:
-        """
-        Context manager for changing the default `state_dict` by `custom_state_dict_extractor.
-         Intentionally for compatible the custom state dict with everything use `state_dict` api.
-        All arguments will be bypassed to self.custom_state_dict_extractor. Not that arguments must not contain LightningModule, which is
-         already passed by default. In other words, it will call state_dict_extractor(self, *args, **kwargs).
-
-        Args:
-            state_dict_extractor: First argument must be LightningModule
-            *args:
-            **kwargs:
-
-        Examples:
-            sd = AdapterAPI.get_adapter_state_dict(module)
-            with module.enable_custom_state_dict(AdapterAPI.get_adapter_state_dict):
-                sd2 = module.state_dict()
-            assert len(sd) == len(sd2)
-            for k,v in sd.items():
-                assert torch.all(sd2[k]==v)
-
-        """
-        setattr(self,self.__custom_state_dict_flag,(state_dict_extractor, args, kwargs) )
-        yield
-        delattr(self,self.__custom_state_dict_flag)
-
-    def state_dict(self, *args, destination=None, prefix="", keep_vars=False)->dict[str, Tensor]:
-        assert len(args)==0, "Not supported anymore, see nn.Module.state_dict for detail."
-        if (custom:=getattr(self,self.__custom_state_dict_flag, None)) is not None:
-            assert len(custom) == 3 and callable(custom[0])
-            return custom[0](self,*custom[1],**custom[2])
-        else:
-            return super().state_dict(
-                destination=destination, prefix=prefix, keep_vars=keep_vars
-            )
-
     # Lightning Hooks
 
     def training_step(
@@ -415,7 +361,14 @@ class StableDiffusionModule(LightningModule):
         self.get_metric(mkey).update(loss, len(batch))
 
         # Note that when the value is logged in step hook, logger only received after `Trainer.log_in_every_n_steps`
-        self.log(f"{mkey}_step",loss, logger=True, prog_bar=True, on_step=True, on_epoch=False)
+        self.log(
+            f"{mkey}_step",
+            loss,
+            logger=True,
+            prog_bar=True,
+            on_step=True,
+            on_epoch=False,
+        )
         return loss
 
     def on_train_epoch_end(self) -> None:
