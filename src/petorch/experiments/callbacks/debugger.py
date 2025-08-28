@@ -120,25 +120,23 @@ class ClearmlImageDebugger(SampleDebugger):
             elif isinstance(images, Sequence):
                 images = list(images)
             else:
-                raise TypeError(f"images must be ImageType or Sequence[ImageType], got {type(images)}")
+                logger.error(f"`images` must be ImageType or Sequence[ImageType], got {type(images)}")
 
             for i, img in enumerate(images):
-                if isinstance(img, ImageType):
-                    if isinstance(img, Image.Image):
-                        info = f"PIL.Image info: mode={img.mode},size={img.size} (width x height)"
-                    else:
-                        assert isinstance(img, np.ndarray)
-                        info = f"Numpy image: dtype={img.dtype}, shape={img.shape}"
-
-                    cml_logger.experiment.logger.report_image(
-                        f"Image samples",
-                        f"step_{trainer.global_step}_epoch_{trainer.current_epoch}_idx_{i}",
-                        image=img
-                    )
-                    logger.info(f"Reporting image...{info}")
-                    cml_logger.experiment.logger.flush(True)
+                assert isinstance(img, ImageType)
+                if isinstance(img, Image.Image):
+                    info = f"PIL.Image info: mode={img.mode},size={img.size} (width x height)"
                 else:
-                    logger.error(f"Unsupported image type: {type(img)}")
+                    assert isinstance(img, np.ndarray)
+                    info = f"Numpy image: dtype={img.dtype}, shape={img.shape}"
+
+                cml_logger.experiment.logger.report_image(
+                    f"Image samples",
+                    f"step_{trainer.global_step}_epoch_{trainer.current_epoch}_idx_{i}",
+                    image=img
+                )
+                logger.info(f"Reporting image...{info}")
+                cml_logger.experiment.logger.flush(True)
 
 
 class ImageOutputCometCallback(SampleDebugger):
@@ -235,5 +233,105 @@ class ImageOutputNeptuneCallback(SampleDebugger):
             assert isinstance(nt_logger, NeptuneLogger)
             images = pl_module.forward(*args, **kwargs)
             nt_logger.experiment[f"output_images/step_{trainer.global_step}"] = images
+
+
+class DebugCallback(Callback):
+    def __init__(
+        self,
+        every_n_batch_steps: int = 10,
+        verbose: bool = False,
+        rank_zero_only: bool = True,
+    ):
+        self.every_n_batch_steps = every_n_batch_steps
+        self.total_training_batches = -999
+        self.verbose = verbose
+        self.rank_zero_only = rank_zero_only
+
+    def _should_skip(self, trainer: "pl.Trainer") -> bool:
+        if self.rank_zero_only and (not trainer.is_global_zero):
+            return True
+        return False
+
+    def on_train_start(
+        self, trainer: "pl.Trainer", pl_module: "pl.LightningModule"
+    ) -> None:
+        if self._should_skip(trainer):
+            return
+
+        self.total_training_batches = (
+            trainer.estimated_stepping_batches * trainer.accumulate_grad_batches
+        )
+        logger.info(
+            f"""
+------- Training Info------------------------
+Total training batches: {self.total_training_batches}
+Training batches per epoch: {trainer.num_training_batches}
+
+Batch size: {trainer.train_dataloader.batch_size}
+Train dataset length: {trainer.train_dataloader.dataset.__len__()}
+Validation batches during training: {trainer.num_val_batches}
+
+Gradient accumulation batch steps: {trainer.accumulate_grad_batches}
+Total optimization steps: {trainer.estimated_stepping_batches}
+Current optimization steps: {trainer.global_step - 1}
+--------------------------------------------------
+            """
+        )
+
+    def on_train_end(
+        self, trainer: "pl.Trainer", pl_module: "pl.LightningModule"
+    ) -> None:
+        if self._should_skip(trainer):
+            return
+
+        self.total_training_batches = -999
+
+    def on_train_batch_start(
+        self,
+        trainer: "pl.Trainer",
+        pl_module: "pl.LightningModule",
+        batch: Any,
+        batch_idx: int,
+    ) -> None:
+        if self._should_skip(trainer):
+            return
+        # TODO: complete this class if needed
+        # if trainer.fit_loop.total_batch_idx % self.every_n_batch_steps == 0:
+        #     if self.verbose:
+        #         if isinstance(batch, SDBatch):
+        #             batch = cast(SDBatch, batch)
+        #             images, input_ids = batch.images, batch.input_ids
+        #             logger.debug(
+        #                 f"`images`: {images.shape}-{images.device}-{images.dtype}\n"
+        #                 f"`input_ids`: {input_ids.shape}-{input_ids.device}-{input_ids.dtype}\n"
+        #             )
+
+    def on_before_zero_grad(
+        self,
+        trainer: "pl.Trainer",
+        pl_module: "pl.LightningModule",
+        optimizer: Optimizer,
+    ) -> None:
+        if self._should_skip(trainer):
+            return
+
+        if self.verbose:
+            logger.debug(
+                f"on_before_zero_grad on batch_idx {trainer.fit_loop.total_batch_idx}/{self.total_training_batches}"
+            )
+
+    def on_before_optimizer_step(
+        self,
+        trainer: "pl.Trainer",
+        pl_module: "pl.LightningModule",
+        optimizer: Optimizer,
+    ) -> None:
+        if self._should_skip(trainer):
+            return
+
+        if self.verbose:
+            logger.debug(
+                f"on_before_optimizer_step on batch_idx {trainer.fit_loop.total_batch_idx}/{self.total_training_batches}"
+            )
 
 

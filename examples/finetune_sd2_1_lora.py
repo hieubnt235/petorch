@@ -1,175 +1,28 @@
 from pathlib import Path
-from types import MethodType
-from typing import (
-    Callable,
-    TypeVar,
-    cast,
-    Type,
-    Generic,
-    Iterator,
-    Sequence,
-    Any, )
 
-
-from petorch import logger
 # TODO: AWARE OF RANK 0 LOG
 import lightning as pl
 import safetensors.torch as st
-import torch
-import torchvision.transforms.v2 as transforms
-from datasets import load_dataset, Dataset as ArrDataset
-from lightning import LightningDataModule, Trainer, Callback
-from lightning.pytorch.loggers import Logger
+from lightning import Trainer, Callback
 from lightning.pytorch.callbacks import (
     TQDMProgressBar,
     ModelSummary,
     LearningRateMonitor,
 )
-from torch.optim import Optimizer
-from torch.utils.data import DataLoader as TorchDataLoader, default_collate
-from transformers import CLIPTokenizerFast, PreTrainedTokenizerBase
+from lightning.pytorch.loggers import Logger
+from torch.utils.data import Dataset
 
 from petorch import AdapterAPI
+from petorch import logger
 from petorch.experiments.callbacks.debugger import ClearmlImageDebugger
 from petorch.experiments.checkpoints import ModelCheckpoint, DefaultCheckpointIO
 from petorch.experiments.loggers import ClearmlLogger
 from petorch.modules.diffusions.stable_diffusion import (
-    StableDiffusionModule,
-    SDBatch,
-    MetricKey,
+    StableDiffusionModule, StableDiffusionDataModule, SDSample,
 )
 from petorch.prebuilt.configs import LoraConfig
 
-
-
-
 model_id = "stabilityai/stable-diffusion-2-1"
-
-
-class DebugCallback(pl.Callback):
-    def __init__(
-        self,
-        every_n_batch_steps: int = 10,
-        verbose: bool = False,
-        rank_zero_only: bool = True,
-    ):
-        self.every_n_batch_steps = every_n_batch_steps
-        self.total_training_batches = -999
-        self.verbose = verbose
-        self.rank_zero_only = rank_zero_only
-
-    def _should_skip(self, trainer: "pl.Trainer") -> bool:
-        if self.rank_zero_only and (not trainer.is_global_zero):
-            return True
-        return False
-
-    def on_train_start(
-        self, trainer: "pl.Trainer", pl_module: "pl.LightningModule"
-    ) -> None:
-        if self._should_skip(trainer):
-            return
-
-        self.total_training_batches = (
-            trainer.estimated_stepping_batches * trainer.accumulate_grad_batches
-        )
-        logger.info(
-            f"""
-------- Training Info------------------------
-Total training batches: {self.total_training_batches}
-Training batches per epoch: {trainer.num_training_batches}
-
-Batch size: {trainer.train_dataloader.batch_size}
-Train dataset length: {trainer.train_dataloader.dataset.__len__()}
-Validation batches during training: {trainer.num_val_batches}
-
-Gradient accumulation batch steps: {trainer.accumulate_grad_batches}
-Total optimization steps: {trainer.estimated_stepping_batches}
-Current optimization steps: {trainer.global_step - 1}
---------------------------------------------------
-            """
-        )
-
-    def on_train_end(
-        self, trainer: "pl.Trainer", pl_module: "pl.LightningModule"
-    ) -> None:
-        if self._should_skip(trainer):
-            return
-
-        self.total_training_batches = -999
-
-    def on_train_batch_start(
-        self,
-        trainer: "pl.Trainer",
-        pl_module: "pl.LightningModule",
-        batch: Any,
-        batch_idx: int,
-    ) -> None:
-        if self._should_skip(trainer):
-            return
-
-        if trainer.fit_loop.total_batch_idx % self.every_n_batch_steps == 0:
-            if self.verbose:
-                if isinstance(batch, SDBatch):
-                    batch = cast(SDBatch, batch)
-                    images, input_ids = batch.images, batch.input_ids
-                    logger.debug(
-                        f"`images`: {images.shape}-{images.device}-{images.dtype}\n"
-                        f"`input_ids`: {input_ids.shape}-{input_ids.device}-{input_ids.dtype}\n"
-                    )
-
-    def on_before_zero_grad(
-        self,
-        trainer: "pl.Trainer",
-        pl_module: "pl.LightningModule",
-        optimizer: Optimizer,
-    ) -> None:
-        if self._should_skip(trainer):
-            return
-
-        if self.verbose:
-            logger.debug(
-                f"on_before_zero_grad on batch_idx {trainer.fit_loop.total_batch_idx}/{self.total_training_batches}"
-            )
-
-    def on_before_optimizer_step(
-        self,
-        trainer: "pl.Trainer",
-        pl_module: "pl.LightningModule",
-        optimizer: Optimizer,
-    ) -> None:
-        if self._should_skip(trainer):
-            return
-
-        if self.verbose:
-            logger.debug(
-                f"on_before_optimizer_step on batch_idx {trainer.fit_loop.total_batch_idx}/{self.total_training_batches}"
-            )
-
-
-def create_metric_checkpoint_callback(
-    checkpoints_path: str,
-    metric: MetricKey,
-    save_best_every_n_epochs: int,
-    save_best_every_n_train_steps: int,
-    mode="min",
-):
-    # This call back will default as every_n_train_steps = 1.
-    # And `save_on_train_epoch_end=True`. So that it check when `on_train_epoch_end` hook.
-    # save_last is None, so only save for top k of monitor value.
-    # This note save last because we not set save last, and provide monitor.
-    return ModelCheckpoint(
-        dirpath=checkpoints_path,
-        filename=f"{{epoch}}-{{step}}-min_{{{metric}:.4f}}",
-        monitor=metric,
-        mode=mode,
-        save_top_k=1,
-        # I save best depend on the epoch metric, so i set every_n_epochs here.
-        every_n_epochs=save_best_every_n_epochs,
-        every_n_train_steps=save_best_every_n_train_steps,
-        save_on_train_epoch_end=True,
-        save_weights_only=True,
-    )
-
 
 def get_trainer(
     dirpath: str,
@@ -265,9 +118,9 @@ def get_trainer(
         kwargs["limit_val_batches"] = kwargs.get("limit_val_batches") or debug_downscale
         max_steps = debug_downscale * max_steps
         accumulate_grad_batches = 1
-        callbacks.append(DebugCallback(10, verbose=False))
-    else:
-        callbacks.append(DebugCallback(20, verbose=False))
+        # callbacks.append(DebugCallback(10, verbose=False))
+    # else:
+        # callbacks.append(DebugCallback(20, verbose=False))
 
     trainer = Trainer(
         default_root_dir=dirpath,
@@ -310,6 +163,21 @@ def get_sd_module(
     logger.debug(f"Trainable params={n:,} | Total params={t:,} | Ratio={n / t:.4f}")
     return module
 
+class NarutoBlipDataset(Dataset):
+    def __init__(self):
+        from datasets import load_dataset, Dataset as ArrDataset
+        self.dataset: ArrDataset = load_dataset("lambdalabs/naruto-blip-captions", split="train")
+
+    def __getitem__(self, item):
+        sample = self.dataset[item]
+        return SDSample(
+            image=sample["image"],
+            text = sample["text"]
+        )
+
+    def __len__(self)->int:
+        return len(self.dataset)
+
 
 if __name__ == "__main__":
     PROJECT_NAME = "sd_2_1"
@@ -323,7 +191,12 @@ if __name__ == "__main__":
     module = get_sd_module(config, adt_ckpt)
 
     # 2. Prepare data
-    data_module = NarutoBlipDataModule(batch_size=4, num_workers=32, train_ratio=0.9)
+    data_module = StableDiffusionDataModule(
+        NarutoBlipDataset,
+        batch_size=4,
+        num_workers=32,
+        train_ratio=0.9
+    )
 
     # 3. Prepare trainer
     pl_trainer = get_trainer(

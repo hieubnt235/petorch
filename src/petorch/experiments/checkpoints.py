@@ -256,3 +256,29 @@ class DefaultCheckpointIO(PLCheckpointIO):
 
     def remove_checkpoint(self, path: _PATH) -> None:
         return remove_checkpoint(path)
+
+
+def create_metric_checkpoint_callback(
+    checkpoints_path: str,
+    metric: str,
+    save_best_every_n_epochs: int,
+    save_best_every_n_train_steps: int,
+    mode="min",
+):
+    # This call back will default as every_n_train_steps = 1.
+    # And `save_on_train_epoch_end=True`. So that it check when `on_train_epoch_end` hook.
+    # save_last is None, so only save for top k of monitor value.
+    # This note save last because we not set save last, and provide monitor.
+    return ModelCheckpoint(
+        dirpath=checkpoints_path,
+        filename=f"{{epoch}}-{{step}}-min_{{{metric}:.4f}}",
+        monitor=metric,
+        mode=mode,
+        save_top_k=1,
+        # I save best depend on the epoch metric, so i set every_n_epochs here.
+        every_n_epochs=save_best_every_n_epochs,
+        every_n_train_steps=save_best_every_n_train_steps,
+        save_on_train_epoch_end=True,
+        save_weights_only=True,
+    )
+
