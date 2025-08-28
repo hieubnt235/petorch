@@ -60,8 +60,8 @@ class TransformWrapperDataset(TorchDataset[Sample_T]):
     def __getitem__(self, item: int)->TFSample_T:
         return self.transform(self.dataset[item])
 
-    def __getattr__(self, item: str)->Any:
-        return getattr(self.dataset, item)
+    def __len__(self)->int:
+        return len(self.dataset)
 
 class DataLoader(TorchDataLoader[Sample_T], Generic[Sample_T, Batch_T]):
     def __iter__(self) -> Iterator[Batch_T]: # type: ignore[override]

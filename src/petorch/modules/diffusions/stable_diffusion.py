@@ -45,14 +45,14 @@ class SDBatch(DataBatch):
     def check_size(self) -> Self:
         input_ids = self.input_ids
         images = self.images
-        assert input_ids.size(0) == images.size(0)
+        assert input_ids.size(0) == images.size(0), f"{input_ids.size()}-{images.size()}"
 
-        assert not torch.is_floating_point(input_ids)
+        assert not torch.is_floating_point(input_ids),f"{input_ids.dtype}"
+        assert torch.is_floating_point(images),f"{images.dtype}"
 
-        assert torch.is_floating_point(images)
-        assert images.size(1) == 3
-        assert len(images.shape) == 4
-        assert (self.images.max() <= 1.0).all() and (self.images.min() >= -1.0).all()
+        assert images.size(1) == 3 ,f"{images.size()}"
+        assert len(images.shape) == 4 ,f"{len(images.shape)}"
+        assert (self.images.max() <= 1.0).all() and (self.images.min() >= -1.0).all() ,f"{self.images.max()}-{self.images.min()}"
         return self
 
     def to(self, device=None, dtype=None, **kwargs) -> Self:
@@ -145,31 +145,6 @@ def default_lr_scheduler_factory(
         # strict=True # Must have monitor value
     )
 
-
-def get_image_transform(
-    size: int | Sequence[int] | None = None,
-) -> transforms.Transform:
-    return transforms.Compose(
-        [
-            transforms.Resize(size or (256, 256)),
-            transforms.RandomHorizontalFlip(),
-            transforms.ToImage(),  # PIL to tensor
-            transforms.ToDtype(
-                dtype=torch.get_default_dtype(), scale=True
-            ),  # convert PIL → tensor [0,1]
-            transforms.Normalize([0.5], [0.5]),  # map [0,1] → [-1,1]
-        ]
-    )
-
-
-def _get_text_transform(
-    tokenizer: PreTrainedTokenizerBase, padding:PaddingStrategy
-) -> Callable[[str | list[str]], torch.Tensor]:
-    def text_transform(text: str | list[str]) -> torch.Tensor:
-        batch_encoding = tokenizer.__call__(text, padding=padding, return_tensors="pt")
-        return batch_encoding.input_ids
-
-    return text_transform
 
 # noinspection PyUnresolvedReferences
 class StableDiffusionModule(LightningModule):
@@ -346,7 +321,7 @@ class StableDiffusionModule(LightningModule):
         num_inference_steps: int = 50,
         timesteps: list[int] = None,
         guidance_scale: float = 7.5,
-        num_images_per_prompt: Optional[int] = 1,
+        num_images_per_prompt: int|None = 1,
         **kwargs: Any,
     ) -> list[PIL.Image.Image] | np.ndarray:
         return self.pipeline.__call__(
@@ -510,6 +485,16 @@ class _TFSample(TypedDict):
     image: torch.Tensor
     text:str
 
+def _get_text_transform(
+    tokenizer: PreTrainedTokenizerBase, padding:PaddingStrategy
+) -> Callable[[str | list[str]], torch.Tensor]:
+    def text_transform(text: str | list[str]) -> torch.Tensor:
+        batch_encoding = tokenizer.__call__(text, padding=padding, return_tensors="pt")
+        return batch_encoding.input_ids
+
+    return text_transform
+
+
 class StableDiffusionDataModule(BaseDataModule[SDSample, SDBatch, StableDiffusionModule, _TFSample]):
     sample_type = SDSample
     batch_type = SDBatch
@@ -586,5 +571,5 @@ class StableDiffusionDataModule(BaseDataModule[SDSample, SDBatch, StableDiffusio
         assert callable(self._text_transform)
         return self.batch_type(
             input_ids = self._text_transform([sample["text"] for sample in samples]),
-            images = torch.cat([sample["image"] for sample in samples])
+            images = torch.stack([sample["image"] for sample in samples])
         )
