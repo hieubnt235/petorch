@@ -11,6 +11,8 @@ from typing import (
     Any, )
 
 
+from petorch import logger
+# TODO: AWARE OF RANK 0 LOG
 import lightning as pl
 import safetensors.torch as st
 import torch
@@ -31,187 +33,17 @@ from petorch import AdapterAPI
 from petorch.experiments.callbacks.debugger import ClearmlImageDebugger
 from petorch.experiments.checkpoints import ModelCheckpoint, DefaultCheckpointIO
 from petorch.experiments.loggers import ClearmlLogger
-from petorch.integrations.diffusers.stable_diffusion import (
+from petorch.modules.diffusions.stable_diffusion import (
     StableDiffusionModule,
     SDBatch,
     MetricKey,
 )
 from petorch.prebuilt.configs import LoraConfig
-from petorch import logger
 
-logger.debug(f"Loger imported")
 
 
 
 model_id = "stabilityai/stable-diffusion-2-1"
-
-
-def get_image_transform(
-    size: int | Sequence[int] | None = None,
-) -> transforms.Transform:
-    return transforms.Compose(
-        [
-            transforms.Resize(size or (256, 256)),
-            transforms.RandomHorizontalFlip(),
-            transforms.ToImage(),  # PIL to tensor
-            transforms.ToDtype(
-                dtype=torch.get_default_dtype(), scale=True
-            ),  # convert PIL → tensor [0,1]
-            transforms.Normalize([0.5], [0.5]),  # map [0,1] → [-1,1]
-        ]
-    )
-
-
-def get_clip_tokenizer(
-    model_path: str = "stabilityai/stable-diffusion-2-1", subfolder: str = "tokenizer"
-) -> CLIPTokenizerFast:
-    return CLIPTokenizerFast.from_pretrained(model_path, subfolder=subfolder)
-
-
-def get_text_transform(
-    tokenizer: PreTrainedTokenizerBase,
-) -> Callable[[str | list[str]], torch.Tensor]:
-    def text_transform(text: str | list[str]) -> torch.Tensor:
-        batch_encoding = tokenizer.__call__(text, padding=True, return_tensors="pt")
-        return batch_encoding.input_ids
-
-    return text_transform
-
-
-_T_Co = TypeVar("_T_Co", covariant=True)
-
-
-class DataLoader(TorchDataLoader, Generic[_T_Co]):
-    def __iter__(self) -> Iterator[_T_Co]:
-        return cast(Iterator[_T_Co], super().__iter__())
-
-
-_Batch_T = TypeVar("_Batch_T", bound=SDBatch, default=SDBatch, covariant=True)
-
-# DatasetType = TorchDataset | ArrDataset |
-
-class NarutoBlipDataModule(LightningDataModule, Generic[_Batch_T]):
-    model_id = "lambdalabs/naruto-blip-captions"
-    batch_type: Type[_Batch_T] = SDBatch
-
-    def __init__(
-        self,
-        *,
-        image_transform_fn: Callable = None,
-        text_transform_fn: Callable = None,
-        train_ratio: float = 0.8,
-        num_workers: int = 8,
-        batch_size=8,
-    ):
-        """
-
-        Args:
-            image_transform_fn: If not provide, they will be init after trainer is assigned, see `setup_transforms`.
-            text_transform_fn:  See `image_transform_fn`
-            train_ratio:
-            num_workers:
-            batch_size:
-        """
-
-        super().__init__()
-        # If None, assign when trainer is assigned (in `setup`).
-        self.image_transform = image_transform_fn
-        self.text_transform = text_transform_fn
-
-        assert train_ratio > 0
-        self.train_ratio = min(1.0, train_ratio)
-        if self.train_ratio < 1.0:
-            self.val_dataset: ArrDataset | None = None
-
-            def _f(obj: NarutoBlipDataModule):
-                return obj._return_dataloader(obj.val_dataset)
-
-            self.val_dataloader = MethodType(_f, self)
-
-        self.dataset: ArrDataset | None = None
-        self.train_dataset: ArrDataset | None = None
-
-        self.num_workers = num_workers
-        self.batch_size = batch_size
-
-    def _collate_fn(self, batch_l: list[dict]) -> _Batch_T:
-        return self.batch_type.model_validate(default_collate(batch_l))
-
-    def prepare_data(self) -> None:
-        load_dataset(self.model_id)
-
-    @property
-    def lightning_module(self):
-        return self.trainer.lightning_module
-
-    def setup_transforms(self):
-        if self.text_transform is None:
-            tokenizer = getattr(self.lightning_module, "tokenizer", None)
-            if tokenizer is None:
-                logger.info(
-                    f"`text_transform` was not given, and `lightning_module` does not have `tokenizer` attribute."
-                    f"Use the default from `{get_clip_tokenizer}` constructor for create transform."
-                )
-                tokenizer = get_clip_tokenizer()
-            else:
-                logger.info(
-                    f"`text_transform` was not given, use `lightning_module.tokenizer` for transform."
-                )
-            self.text_transform = get_text_transform(tokenizer)
-
-        if self.image_transform is None:
-            sample_size = getattr(self.lightning_module, "sample_size", None)
-            if sample_size is None:
-                logger.info(
-                    f"`image_transform` was not given, and `lightning_module` does not have `sample_size` attribute."
-                    f"Use the default from `{get_image_transform}` constructor for create transform."
-                )
-            else:
-                logger.info(
-                    f"`image_transform` was not given, use `lightning_module.sample_size`={sample_size} for constructing transform."
-                )
-            self.image_transform = get_image_transform(sample_size)
-
-    def _transform(self, sample: dict):
-        return dict(
-            images=self.image_transform(sample["image"]),
-            input_ids=self.text_transform(sample["text"]),
-        )
-
-    def setup(self, stage: str = None) -> None:
-        dataset = load_dataset(self.model_id, split="train")
-        self.setup_transforms()
-
-        dataset.set_transform(self._transform)
-        self.dataset = dataset
-
-        if self.train_ratio >= 1:
-            self.train_dataset = self.dataset
-            logger.info(
-                f"Dataset lengths: train={len(self.train_dataset)}, val=None")
-        else:
-            ds_dict = self.dataset.train_test_split(train_size=self.train_ratio)
-            self.train_dataset = ds_dict["train"]
-            self.val_dataset = ds_dict["test"]
-            logger.info(
-                f"Dataset lengths: train={len(self.train_dataset)}, val={len(self.val_dataset)}")
-
-    def _return_dataloader(self, dataset) -> DataLoader[_Batch_T]:
-        return DataLoader(
-            dataset,
-            batch_size=self.batch_size,
-            num_workers=self.num_workers,
-            collate_fn=self._collate_fn,
-            drop_last=True,
-        )
-
-    def train_dataloader(self) -> DataLoader[_Batch_T]:
-        return self._return_dataloader(self.train_dataset)
-
-    def transfer_batch_to_device(
-        self, batch: SDBatch, device: torch.device, dataloader_idx: int
-    ) -> SDBatch:
-        return batch.to(device=device, dtype=self.lightning_module.dtype)
 
 
 class DebugCallback(pl.Callback):

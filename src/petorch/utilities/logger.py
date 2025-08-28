@@ -35,7 +35,7 @@ logger_info_set = ["lightning", "clearml"]
 logger_debug_set = [__name__,"__main__", "petorch"]
 """Allow all logs with info level from these module are logged."""
 
-logger_modules_to_setup = ["lightning","transformers", "diffusers", "torch"]
+logger_modules_to_setup = ["lightning","transformers", "diffusions", "torch"]
 """Loggers will be setup manually. If not in debug or info set, the default is warning level.
 The modules were chosen in info or debug set, must be append in this set, to refresh every setup.
 """

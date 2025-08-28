@@ -276,7 +276,7 @@ class ClearmlLogger(BaseLogger):
                 )
                 _om.tags = tags
                 _om.set_all_metadata(meta, replace=True)
-                logger.info(f"Uploaded new checkpoint successfully:\n "
+                logger.info(f"Uploaded new checkpoint successfully:\n"
                             f"Local path={saved_filepath}\n"
                             f"Model name={_om.name}\n"
                             f"Model id={_om.id}\n"
