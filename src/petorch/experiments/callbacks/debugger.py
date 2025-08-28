@@ -31,7 +31,6 @@ class SampleDebugger(Callback, ABC):
         assert every_n_epochs is None or every_n_epochs>=1
         assert every_n_train_steps is None or every_n_train_steps>=1
         assert every_n_epochs or every_n_train_steps
-
         self.every_n_epochs = int(every_n_epochs) if every_n_epochs is not None else None
         self.every_n_train_steps = int(every_n_train_steps) if every_n_train_steps is not None else None
 
@@ -63,22 +62,22 @@ class SampleDebugger(Callback, ABC):
     @rank_zero_only
     def on_before_zero_grad(self, trainer: "pl.Trainer", pl_module: "pl.LightningModule", optimizer: Optimizer) -> None:
         if trainer.is_global_zero and self.every_n_train_steps is not None and trainer.global_step % self.every_n_train_steps == 0:
-            self._gen_and_store(trainer, pl_module)
             # Call log here to get the method name also.
             logger.info(f"{self.__class__.__name__}: Generating and storing output at "
                         f"step={trainer.global_step},"
                         f" epoch={trainer.current_epoch}..."
             )
+            self._gen_and_store(trainer, pl_module)
 
     @rank_zero_only
     def on_train_epoch_end(self, trainer: "pl.Trainer", pl_module: "pl.LightningModule") -> None:
         if trainer.is_global_zero and self.every_n_epochs is not None and trainer.current_epoch % self.every_n_epochs == 0:
-            self._gen_and_store(trainer, pl_module)
             # Call log here to get the method name also.
             logger.info(f"{self.__class__.__name__}: Generating and storing output at "
                         f"step={trainer.global_step}, "
                         f"epoch={trainer.current_epoch}..."
             )
+            self._gen_and_store(trainer, pl_module)
 
 ImageType = Union[np.ndarray, Image.Image]
 class ClearmlImageDebugger(SampleDebugger):

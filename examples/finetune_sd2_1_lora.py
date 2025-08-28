@@ -8,8 +8,8 @@ from typing import (
     Generic,
     Iterator,
     Sequence,
-    Any,
-)
+    Any, )
+
 
 import lightning as pl
 import safetensors.torch as st
@@ -17,19 +17,17 @@ import torch
 import torchvision.transforms.v2 as transforms
 from datasets import load_dataset, Dataset as ArrDataset
 from lightning import LightningDataModule, Trainer, Callback
+from lightning.pytorch.loggers import Logger
 from lightning.pytorch.callbacks import (
     TQDMProgressBar,
     ModelSummary,
     LearningRateMonitor,
 )
-from lightning.pytorch.loggers import (
-    Logger,
-)
 from torch.optim import Optimizer
 from torch.utils.data import DataLoader as TorchDataLoader, default_collate
 from transformers import CLIPTokenizerFast, PreTrainedTokenizerBase
 
-from petorch import AdapterAPI, logger
+from petorch import AdapterAPI
 from petorch.experiments.callbacks.debugger import ClearmlImageDebugger
 from petorch.experiments.checkpoints import ModelCheckpoint, DefaultCheckpointIO
 from petorch.experiments.loggers import ClearmlLogger
@@ -39,6 +37,11 @@ from petorch.integrations.diffusers.stable_diffusion import (
     MetricKey,
 )
 from petorch.prebuilt.configs import LoraConfig
+from petorch import logger
+
+logger.debug(f"Loger imported")
+
+
 
 model_id = "stabilityai/stable-diffusion-2-1"
 
@@ -85,6 +88,7 @@ class DataLoader(TorchDataLoader, Generic[_T_Co]):
 
 _Batch_T = TypeVar("_Batch_T", bound=SDBatch, default=SDBatch, covariant=True)
 
+# DatasetType = TorchDataset | ArrDataset |
 
 class NarutoBlipDataModule(LightningDataModule, Generic[_Batch_T]):
     model_id = "lambdalabs/naruto-blip-captions"
@@ -168,33 +172,29 @@ class NarutoBlipDataModule(LightningDataModule, Generic[_Batch_T]):
                 )
             self.image_transform = get_image_transform(sample_size)
 
+    def _transform(self, sample: dict):
+        return dict(
+            images=self.image_transform(sample["image"]),
+            input_ids=self.text_transform(sample["text"]),
+        )
+
     def setup(self, stage: str = None) -> None:
         dataset = load_dataset(self.model_id, split="train")
         self.setup_transforms()
 
-        def _transform(sample: dict):
-            return dict(
-                images=self.image_transform(sample["image"]),
-                input_ids=self.text_transform(sample["text"]),
-            )
-
-        dataset.set_transform(_transform)
+        dataset.set_transform(self._transform)
         self.dataset = dataset
 
         if self.train_ratio >= 1:
             self.train_dataset = self.dataset
             logger.info(
-                f"Length train dataset: {len(self.train_dataset)}\n"
-                f"Length val dataset: None"
-            )
+                f"Dataset lengths: train={len(self.train_dataset)}, val=None")
         else:
             ds_dict = self.dataset.train_test_split(train_size=self.train_ratio)
             self.train_dataset = ds_dict["train"]
             self.val_dataset = ds_dict["test"]
             logger.info(
-                f"Length train dataset: {len(self.train_dataset)}\n"
-                f"Length val dataset: {len(self.val_dataset)}"
-            )
+                f"Dataset lengths: train={len(self.train_dataset)}, val={len(self.val_dataset)}")
 
     def _return_dataloader(self, dataset) -> DataLoader[_Batch_T]:
         return DataLoader(
@@ -207,11 +207,6 @@ class NarutoBlipDataModule(LightningDataModule, Generic[_Batch_T]):
 
     def train_dataloader(self) -> DataLoader[_Batch_T]:
         return self._return_dataloader(self.train_dataset)
-
-    # def val_dataloader(self) -> DataLoader[_Batch_T]:
-    #     if self.val_dataset is None:
-    #         return super().val_dataloader()
-    #     else:
 
     def transfer_batch_to_device(
         self, batch: SDBatch, device: torch.device, dataloader_idx: int
@@ -496,7 +491,7 @@ if __name__ == "__main__":
     module = get_sd_module(config, adt_ckpt)
 
     # 2. Prepare data
-    data_module = NarutoBlipDataModule(batch_size=4, num_workers=32, train_ratio=0.95)
+    data_module = NarutoBlipDataModule(batch_size=4, num_workers=32, train_ratio=0.9)
 
     # 3. Prepare trainer
     pl_trainer = get_trainer(
@@ -518,10 +513,11 @@ if __name__ == "__main__":
         addition_callbacks=[
             LearningRateMonitor(),
             ClearmlImageDebugger(
-                "A girl with yellow hair in hoodie", every_n_epochs=1
+                "A man with yellow hair in hoodie", every_n_epochs=1
             ),
         ],
         log_every_n_steps=10,  # batch steps (training_step), not optimization step.
         debug=True,
+        debug_downscale=0.1
     )
     pl_trainer.fit(module, datamodule=data_module)

@@ -1,6 +1,4 @@
-import os
 import pprint
-import tempfile
 from argparse import Namespace
 from pathlib import Path
 from typing import (
@@ -14,18 +12,16 @@ from typing import (
     cast, TYPE_CHECKING,
 )
 
-import numpy as np
-from PIL import Image
 from lightning import LightningModule
 from lightning.fabric.loggers.logger import rank_zero_experiment
 from lightning.pytorch.callbacks import ModelCheckpoint
 from lightning.pytorch.utilities.model_summary import summarize
-from lightning.pytorch.utilities.rank_zero import rank_zero_only
+from lightning.pytorch.utilities.rank_zero import rank_zero_only, rank_zero_info
 from torch import Tensor
 from torch.nn import Module
 
-from .base import BaseLogger
 from petorch import logger
+from .base import BaseLogger
 from ...utilities import b64encode
 
 if TYPE_CHECKING:
@@ -46,17 +42,12 @@ class ClearmlLogger(BaseLogger):
         self,
         log_model_checkpoint: bool = True,
         checkpoint_path: str = "checkpoints",  # Will be concat with dirpath_id of checkpoint model.
-
-        # Optional, ignore for the first time
-        init_new: bool = True,
         encode_dirpath:bool=True,
         *,
-
         # clearml.Task args
         project_name: str | None = None,
         task_name: str | None = None,
         task_type: "TaskTypes" = None,
-        task_id: str | None = None,
         tags: Sequence[str] | None = None,
         output_uri: str = "https://files.clear.ml",
         **clearml_task_kwargs,
@@ -67,17 +58,14 @@ class ClearmlLogger(BaseLogger):
             project_name:
             task_name:
             task_type:
-            task_id: The existed task id. Only be used when `init_new` = False
             tags:
             init_new: If False, use Task.get_task to get the old task.
         """
         from clearml import TaskTypes
 
-        self._init_new = init_new
         self._project_name = project_name
         self._task_name = task_name
         self._task_type =  cast(TaskTypes,task_type or TaskTypes.training)
-        self._task_id = task_id
         self._tags = tags
         self._output_uri = output_uri
         self._clearml_task_kwargs = clearml_task_kwargs
@@ -96,10 +84,18 @@ class ClearmlLogger(BaseLogger):
 
     @rank_zero_only
     def _init_task(self):
+        """This method only be called in rank 0"""
         from clearml import Task
-        _ = self._get_task()
-        assert isinstance(Task.current_task(),Task)
-        logger.info(f"Clearml Task initialized.")
+        Task.init(
+            project_name=self._project_name,
+            task_name=self._task_name,
+            task_type=self._task_type,
+            tags=self._tags,
+            output_uri=self._output_uri,
+            auto_connect_frameworks={"pytorch": False}, # Use manually only
+            **self._clearml_task_kwargs,
+        )
+        logger.info(f"Clearml Task initialized.") # This log must ony exist one in the console (rank 0 only)
 
     @rank_zero_experiment
     def _get_task(self)->"Task":
@@ -107,24 +103,8 @@ class ClearmlLogger(BaseLogger):
 
         curr_task = Task.current_task()
         if curr_task is None:
-            if self._init_new:
-                curr_task =  Task.init(
-                    project_name=self._project_name,
-                    task_name=self._task_name,
-                    task_type=self._task_type,
-                    tags=self._tags,
-                    output_uri=self._output_uri,
-                    auto_connect_frameworks={"pytorch": False},
-                    **self._clearml_task_kwargs,
-                )
-            else:
-                curr_task= Task.get_task(
-                    self._task_id,
-                    self._project_name,
-                    self._task_name,
-                    self._tags,
-                    **self._clearml_task_kwargs,
-                )
+            self._init_task() # Rank zero only
+            curr_task = Task.current_task()
         assert isinstance(curr_task, Task)
         return  curr_task
 
@@ -136,9 +116,16 @@ class ClearmlLogger(BaseLogger):
         See Also:
             https://clear.ml/docs/latest/docs/references/sdk/task (The first INFO)
         """
-        from clearml import Task
-        task:Task = self._get_task() # If rank > 0, return Dummy
-        task = Task.get_task(task_id=task.id)  # If not comment this every thing works
+        """
+        Notes:
+            I not use rank_zero_experiment here, because the property will be evaluated first then pass to decorator,
+            It makes the code running while it not in rank zero, then accidentally init the task in rank >0.
+            The `_get_task` is function not property, so it not be evaluated before passing to decorator.
+        """
+
+        task = self._get_task()
+        # If rank > 0, return Dummy
+        logger.debug(f"`experiment` property return with type: {task.__class__.__name__}")
         return task
 
     @property
@@ -220,7 +207,6 @@ class ClearmlLogger(BaseLogger):
             self.experiment.mark_failed()
         elif status == "aborted":
             self.experiment.mark_stopped()
-        self._task = None
 
     def _filepath_to_model_name(self, path: str) -> str:
         path = Path(path)
@@ -281,15 +267,21 @@ class ClearmlLogger(BaseLogger):
 
             # Update the weights
             try:
-                self._output_models[saved_filepath].update_weights(
+                _om = self._output_models[saved_filepath]
+                uri = _om.update_weights(
                     saved_filepath,
                     target_filename=self._filepath_to_repo_path(saved_filepath),
                     iteration=checkpoint_callback._last_global_step_saved or None,
                     async_enable=False,  # Block.
                 )
-                self._output_models[saved_filepath].tags = tags
-                self._output_models[saved_filepath].set_all_metadata(meta, replace=True)
-                logger.info(f"Uploaded new checkpoint successfully:\n {saved_filepath}")
+                _om.tags = tags
+                _om.set_all_metadata(meta, replace=True)
+                logger.info(f"Uploaded new checkpoint successfully:\n "
+                            f"Local path={saved_filepath}\n"
+                            f"Model name={_om.name}\n"
+                            f"Model id={_om.id}\n"
+                            f"Mode uri={uri}\n"
+                            f"Model tags={_om.tags}")
                 
             except Exception as e:
                 logger.error(e)
@@ -313,22 +305,36 @@ class ClearmlLogger(BaseLogger):
                         flag = Model.remove(model.id, force=True, raise_on_errors=True)
                         if not flag:
                             raise ValueError(
-                                f"Remove model fails (partial remove): `name={model.name}`, `id={model}`."
+                                f"Remove model fails (partial remove): `name={model.name}`, `id={model.id}`."
                             )
-                        self._output_models.pop(filepath)
-                        logger.debug(f"Remove checkpoint successfully: `name={model.name}`, `id={model}`.")
+                        # self._output_models.pop(filepath)
+                        logger.info(f"Remove old checkpoint successfully:\n"
+                                    f" `name={model.name}`, `id={model.id}`."
+                                    )
                     except ValueError as e:
                         logger.error(e)
+
+                    # This line should be here instead of in try block to prevent the case that Model as removed,
+                    # but raise error somehow, so that next time it will find again and continuously
+                    # raise error `Could not find model id=...`
+                    self._output_models.pop(filepath)
+
             logger.debug(f"Checkpoints in repo after save new checkpoint:\n {pprint.pformat(self.task_models)}")
             logger.debug(f"Output Models cache filepath: \n{pprint.pformat(self._output_models)}")
 
 
     def __getstate__(self) -> Union[str, None]:
-        if self.experiment:
+        from clearml import Task
+        if isinstance(self.experiment, Task):
             return self.experiment.id
 
     def __setstate__(self, state: str) -> None:
+        from clearml import Task
         if state:
-            self._task_id = state
-            self._init_new = False
+            task = Task.get_task(state)
+            self._project_name = task.project
+            self._task_name = task.name,
+            self._task_type = task.task_type
+            self._tags = task.get_tags()
+            self._output_uri = task.output_uri,
             self._init_task()

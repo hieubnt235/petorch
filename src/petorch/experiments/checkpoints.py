@@ -117,8 +117,6 @@ class ModelCheckpoint(pl_callbacks.ModelCheckpoint):
                 assert callable(self._state_dict_extractor)
                 org_state_dict = module.state_dict
                 module.state_dict = MethodType(self._state_dict_extractor, module)
-                logger.debug(f"Original statedict = {type(org_state_dict)}")
-                logger.debug(f"module.state_dict type = {type(module.state_dict)}")
             yield
         finally:
             if org_state_dict is not None:
