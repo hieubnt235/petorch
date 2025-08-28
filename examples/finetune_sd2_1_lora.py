@@ -134,8 +134,6 @@ def get_trainer(
         plugins=DefaultCheckpointIO(),
         # accelerator="cpu",
         # fast_dev_run=10,
-        # limit_train_batches=0.2,
-        # limit_val_batches=0.2,
         **kwargs,
     )
     return trainer
@@ -181,10 +179,11 @@ class NarutoBlipDataset(Dataset):
 
 if __name__ == "__main__":
     PROJECT_NAME = "sd_2_1"
-    storage_path = "../storages/"
+    storage_path = "/home/hieuhieuhieu/petorch/storages/"
     adt_ckpt = None
 
     # 1. Prepare model
+    # Add lora to unet only
     config = LoraConfig(
         adapter_name="default", rank=16, alpha=16, fqname_filter=lambda _n: "unet" in _n
     )
@@ -195,7 +194,7 @@ if __name__ == "__main__":
         NarutoBlipDataset,
         batch_size=4,
         num_workers=32,
-        train_ratio=0.9
+        train_ratio=0.95
     )
 
     # 3. Prepare trainer
@@ -203,7 +202,7 @@ if __name__ == "__main__":
         storage_path + PROJECT_NAME,
         max_steps=5000,
         # save_every_n_train_steps=10,  # change 5 or 10 for debug, train batch step, not optimization step
-        save_every_n_epochs=1,
+        save_every_n_epochs=4,
         save_top_k=3,
         accumulate_grad_batches=4,
         addition_loggers=[
@@ -211,18 +210,18 @@ if __name__ == "__main__":
                 log_model_checkpoint=True,
                 checkpoint_path="checkpoints",
                 project_name=PROJECT_NAME,
-                task_name="naruto_blip_lora_r16_test",
+                task_name="finetune_naruto_blip_lora_r16",
                 output_uri="https://files.clear.ml"
             )
         ],
         addition_callbacks=[
             LearningRateMonitor(),
             ClearmlImageDebugger(
-                "A man with yellow hair in hoodie", every_n_epochs=1
+                "A girl with blonde hair and blue eyes.", every_n_epochs=2
             ),
         ],
         log_every_n_steps=10,  # batch steps (training_step), not optimization step.
-        debug=True,
-        debug_downscale=0.1
+        # debug=True,
+        # debug_downscale=0.1
     )
     pl_trainer.fit(module, datamodule=data_module)
