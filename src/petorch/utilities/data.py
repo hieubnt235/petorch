@@ -3,18 +3,19 @@ from types import MethodType
 from typing import Callable, Protocol, TypeVar, Generic, Iterator, cast, TYPE_CHECKING, Self, TypeAlias, \
     Sequence, Any
 
-from lightning import LightningDataModule
+from lightning import LightningDataModule, LightningModule
 from lightning.pytorch.trainer.states import TrainerFn
 from torch.utils.data import DataLoader as TorchDataLoader, Dataset as TorchDataset, random_split
 
 from petorch import logger
 
 if TYPE_CHECKING:
-    from pydantic import BaseModel
+    from pydantic import BaseModel, ConfigDict
     import lightning as pl
     import torch
 
 class DataBatch(BaseModel, ABC):
+    model_config = ConfigDict(arbitrary_types_allowed=True, validate_assignment=True, validate_default=True)
 
     @abstractmethod
     def to(self, device: torch.device|str|None=None, dtype: torch.dtype|str|None=None, **kwargs:dict[str, Any]) -> Self:
@@ -36,12 +37,15 @@ class DataBatch(BaseModel, ABC):
     def __len__(self) -> int:
         ...
 
+    def __getitem__(self, item:str)->Any:
+        return getattr(self,item)
+
 
 Sample_T_Co = TypeVar("Sample_T_Co", covariant=True)
 Batch_T = TypeVar("Batch_T", bound=DataBatch)
-TransformFn: TypeAlias = Callable[[Sample_T_Co], Sample_T_Co]
-CollateFn: TypeAlias = Callable[[Sequence[Sample_T_Co]], Batch_T]
-
+Module_T = TypeVar("Module_T", bound=LightningModule, covariant=True)
+SampleTransform: TypeAlias = Callable[[Sample_T_Co], Sample_T_Co]
+BatchTransform: TypeAlias = Callable[[Sequence[Sample_T_Co]], Batch_T]
 
 class DatasetType(Protocol[Sample_T_Co]):
     def __getitem__(self, index: int) -> Sample_T_Co:
@@ -51,7 +55,7 @@ class DatasetType(Protocol[Sample_T_Co]):
 
 class TransformWrapperDataset(TorchDataset[Sample_T_Co]):
 
-    def __init__(self, dataset: DatasetType[Sample_T_Co], transform: TransformFn[Sample_T_Co]):
+    def __init__(self, dataset: DatasetType[Sample_T_Co], transform: SampleTransform[Sample_T_Co]):
         self.dataset = dataset
         self.transform = transform
 
@@ -65,10 +69,21 @@ class DataLoader(TorchDataLoader[Sample_T_Co], Generic[Sample_T_Co, Batch_T]):
     def __iter__(self) -> Iterator[Batch_T]: # type: ignore[override]
         return cast(Iterator[Batch_T], super().__iter__())
 
-class DataModule(LightningDataModule, Generic[Sample_T_Co,Batch_T], ABC):
-    collate_fn: CollateFn[Sample_T_Co, Batch_T] |None = None
+class BaseDataModule(LightningDataModule, Generic[Sample_T_Co,Batch_T, Module_T], ABC):
+    module_type: type[Module_T]
+    batch_type: type[Batch_T]
 
     val_dataloader: Callable[[], Any]
+    """This is a hack to disable the check for overriding of lightning, also pass the method assignment checking of mypy.
+    This have no affect at runtime, just ignore it.
+    """
+
+    def __init_subclass__(cls, **kwargs)->None:
+        assert hasattr(cls, "module_type"),"`module_type` must be specified."
+        assert isinstance(getattr(cls,"module_type"), LightningModule), "`module_type` must be subclass of `LightningModule`.`"
+
+        assert hasattr(cls, "batch_type"),"`batch_type` must be specified."
+        assert isinstance(getattr(cls,"batch_type"), DataBatch), "`batch_type` must be subclass of `DataBatch`."
 
     def __init__(
         self,
@@ -79,6 +94,7 @@ class DataModule(LightningDataModule, Generic[Sample_T_Co,Batch_T], ABC):
         num_workers: int = 8,
         batch_size: int =8,
     )->None:
+
         if dataset_factory is not None and dataset is not None:
             raise ValueError(
                 "`dataset_factory` and `dataset` can not be given at the same time, choose one only. ")
@@ -97,7 +113,7 @@ class DataModule(LightningDataModule, Generic[Sample_T_Co,Batch_T], ABC):
             self.val_dataset: DatasetType[Sample_T_Co] | None = None
 
             # Patch it
-            def _f(obj: DataModule[Sample_T_Co,Batch_T])->DataLoader[Sample_T_Co,Batch_T]:
+            def _f(obj: BaseDataModule[Sample_T_Co,Batch_T, Module_T])->DataLoader[Sample_T_Co,Batch_T]:
                 assert obj.val_dataset is not None
                 return obj._return_dataloader(obj.val_dataset)
             self.val_dataloader = MethodType(_f, self)
@@ -106,19 +122,34 @@ class DataModule(LightningDataModule, Generic[Sample_T_Co,Batch_T], ABC):
 
         self.num_workers = num_workers
         self.batch_size = batch_size
-        self.transform_fn:TransformFn[Sample_T_Co] |None = None
+        self.transform_fn: SampleTransform[Sample_T_Co] | None = None
 
     @property
-    def lightning_module(self)-> "pl.LightningModule":
+    def module(self)-> Module_T:
         if self.trainer is None:
             raise ValueError("Trainer have not yet been set. You must pass this class in Trainer.fit instead of call manually. ")
-        return self.trainer.lightning_module
+        module =  self.trainer.lightning_module
+        assert isinstance(module, self.module_type), (f"The `module_type` of {self.__class__.__name__} is {self.module_type}. "
+                                                      f"But {module} is {module.__class__.__name__}. ")
+        return module
+
+    @property
+    def dataset(self)->DatasetType[Sample_T_Co]:
+        assert self._dataset is not None, "`dataset` has not yet been set."
+        return self._dataset
+
+    def _setup_with_module_and_dataset(self)->None:
+        """Sometime setup need module or dataset information. So it should be setup at running,
+        when you can access model through `self.module` and dataset through `self.dataset` properties.
+        """
+        pass
 
     @abstractmethod
-    def _setup_transforms(self)->TransformFn[Sample_T_Co]:
-        """Sometime transform need model information. So it should be setup at running."""
+    def _collate_fn(self,samples: Sequence[Sample_T_Co])->Batch_T:
+        ...
 
     # ---- Lightning hooks ----
+
 
     def prepare_data(self) -> None:
         self._dataset_factory()
@@ -127,11 +158,7 @@ class DataModule(LightningDataModule, Generic[Sample_T_Co,Batch_T], ABC):
         """This is call by Trainer, if you call manually, make sure it does not have any process access to self.Trainer,
          such as auto find for resize sample (see `_setup_transforms`), means that if you pass your custom resize, it will run well.
         """
-        dataset = self._dataset_factory()
-        self.transform_fn = self._setup_transforms()
-
-        self._dataset = dataset
-
+        self._dataset = self._dataset_factory()
         if self.train_ratio >= 1:
             self.train_dataset = self._dataset
             logger.info(
@@ -146,14 +173,14 @@ class DataModule(LightningDataModule, Generic[Sample_T_Co,Batch_T], ABC):
             )
             logger.info(
                 f"Dataset lengths: train={len(self.train_dataset)}, val={len(self.val_dataset)}")
+        self._setup_with_module_and_dataset()
 
     def _return_dataloader(self, dataset:DatasetType[Sample_T_Co]) -> DataLoader[Sample_T_Co,Batch_T]:
-        assert callable(self.transform_fn)
         return DataLoader[Sample_T_Co, Batch_T](
-            TransformWrapperDataset(dataset=dataset,transform= self.transform_fn),
+            cast(TorchDataset[Sample_T_Co],dataset),
             batch_size=self.batch_size,
             num_workers=self.num_workers,
-            collate_fn=self.collate_fn,
+            collate_fn=self._collate_fn,
             drop_last=True,
         )
 
@@ -164,5 +191,5 @@ class DataModule(LightningDataModule, Generic[Sample_T_Co,Batch_T], ABC):
     def transfer_batch_to_device(
         self, batch: Batch_T, device: torch.device|str|None, dataloader_idx: int
     ) -> Batch_T:
-        return batch.to(device=device, dtype=self.lightning_module.dtype)
+        return batch.to(device=device, dtype=cast(torch.dtype,self.module.dtype))
 
