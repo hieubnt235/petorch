@@ -1,3 +1,10 @@
+# Three main APIs
+__all__=[
+    "StableDiffusionModule",
+    "StableDiffusionDataModule",
+    "SDSample"
+]
+
 from enum import StrEnum
 from typing import (
     Callable,
@@ -12,23 +19,39 @@ from typing import Self, Literal
 import PIL
 import numpy as np
 import torch
+
 # TODO: AWARE OF RANK 0 LOG
 import torchvision.transforms.v2 as transforms
 from PIL import Image
-from diffusers import (StableDiffusionPipeline, AutoencoderKL, UNet2DConditionModel, DDIMScheduler, DDPMScheduler, )
+from diffusers import (
+    StableDiffusionPipeline,
+    AutoencoderKL,
+    UNet2DConditionModel,
+    DDIMScheduler,
+    DDPMScheduler,
+)
 from diffusers.models.autoencoders.vae import DiagonalGaussianDistribution
 from diffusers.models.unets.unet_2d_condition import UNet2DConditionOutput
 from diffusers.optimization import get_cosine_schedule_with_warmup
 from lightning import LightningModule
 from lightning.pytorch.trainer.states import TrainerFn
-from lightning.pytorch.utilities.types import (STEP_OUTPUT, OptimizerLRScheduler, OptimizerLRSchedulerConfig,
-                                               LRSchedulerConfigType, )
+from lightning.pytorch.utilities.types import (
+    STEP_OUTPUT,
+    OptimizerLRScheduler,
+    OptimizerLRSchedulerConfig,
+    LRSchedulerConfigType,
+)
 from pydantic import model_validator
 from torch import Tensor, IntTensor, FloatTensor
 from torch import nn
 from torch.optim import Optimizer
 from torchmetrics import MeanMetric, Metric
-from transformers import (CLIPTokenizer, CLIPTextModel, CLIPTokenizerFast, CLIPImageProcessor, )
+from transformers import (
+    CLIPTokenizer,
+    CLIPTextModel,
+    CLIPTokenizerFast,
+    CLIPImageProcessor,
+)
 from transformers import PreTrainedTokenizerBase
 from transformers.modeling_outputs import BaseModelOutputWithPooling
 from transformers.utils import PaddingStrategy
@@ -45,14 +68,18 @@ class SDBatch(DataBatch):
     def check_size(self) -> Self:
         input_ids = self.input_ids
         images = self.images
-        assert input_ids.size(0) == images.size(0), f"{input_ids.size()}-{images.size()}"
+        assert input_ids.size(0) == images.size(
+            0
+        ), f"{input_ids.size()}-{images.size()}"
 
-        assert not torch.is_floating_point(input_ids),f"{input_ids.dtype}"
-        assert torch.is_floating_point(images),f"{images.dtype}"
+        assert not torch.is_floating_point(input_ids), f"{input_ids.dtype}"
+        assert torch.is_floating_point(images), f"{images.dtype}"
 
-        assert images.size(1) == 3 ,f"{images.size()}"
-        assert len(images.shape) == 4 ,f"{len(images.shape)}"
-        assert (self.images.max() <= 1.0).all() and (self.images.min() >= -1.0).all() ,f"{self.images.max()}-{self.images.min()}"
+        assert images.size(1) == 3, f"{images.size()}"
+        assert len(images.shape) == 4, f"{len(images.shape)}"
+        assert (self.images.max() <= 1.0).all() and (
+            self.images.min() >= -1.0
+        ).all(), f"{self.images.max()}-{self.images.min()}"
         return self
 
     def to(self, device=None, dtype=None, **kwargs) -> Self:
@@ -157,6 +184,27 @@ class StableDiffusionModule(LightningModule):
         scheduler:
 
     You can override all methods defined on this class to customize for your case.
+    
+    Training process:
+    
+        # 1. Encode input image to latent space
+        latent = VAE.encode(image) # shape [B, C, H, W]
+
+        # 2. Add noise according to timestep
+        t = sample_timestep()
+        noisy_latent = add_noise(latent, t)
+
+        # 3. Encode text prompt
+        text_emb = CLIPTextEncoder(prompt)   # shape [B, L, D]
+
+        # 4. Predict noise with UNet (cross-attn with text)
+        pred_noise = UNet(noisy_latent, t, context=text_emb)
+
+        # 5. Loss: predicted noise vs actual noise
+        loss = MSE(pred_noise, noise)
+        loss.backward()
+
+
     """
 
     def __init__(
@@ -314,14 +362,14 @@ class StableDiffusionModule(LightningModule):
 
     def forward(
         self,
-        prompt: str| list[str]|None = None,
+        prompt: str | list[str] | None = None,
         *,
-        height: int|None = None,
-        width: int|None = None,
+        height: int | None = None,
+        width: int | None = None,
         num_inference_steps: int = 50,
         timesteps: list[int] = None,
         guidance_scale: float = 7.5,
-        num_images_per_prompt: int|None = 1,
+        num_images_per_prompt: int | None = 1,
         **kwargs: Any,
     ) -> list[PIL.Image.Image] | np.ndarray:
         return self.pipeline.__call__(
@@ -332,14 +380,14 @@ class StableDiffusionModule(LightningModule):
             timesteps=timesteps,
             guidance_scale=guidance_scale,
             num_images_per_prompt=num_images_per_prompt,
-            **kwargs
+            **kwargs,
         ).images
 
     def forward_batch_loss(
         self, batch: SDBatch, batch_index: int, **kwargs
     ) -> torch.Tensor:
-        assert isinstance(batch_index, int) # Fake use
-        assert isinstance(kwargs, dict) # Fake use
+        assert isinstance(batch_index, int)  # Fake use
+        assert isinstance(kwargs, dict)  # Fake use
 
         latents = self.vae_encode(batch.images)
         noises = self.create_noises(latents.shape)
@@ -477,16 +525,19 @@ class StableDiffusionModule(LightningModule):
             optimizer=optimizer, lr_scheduler=lr_scheduler
         )
 
+
 class SDSample(TypedDict):
     image: Image.Image
     text: str
 
+
 class _TFSample(TypedDict):
     image: torch.Tensor
-    text:str
+    text: str
+
 
 def _get_text_transform(
-    tokenizer: PreTrainedTokenizerBase, padding:PaddingStrategy
+    tokenizer: PreTrainedTokenizerBase, padding: PaddingStrategy
 ) -> Callable[[str | list[str]], torch.Tensor]:
     def text_transform(text: str | list[str]) -> torch.Tensor:
         batch_encoding = tokenizer.__call__(text, padding=padding, return_tensors="pt")
@@ -495,27 +546,28 @@ def _get_text_transform(
     return text_transform
 
 
-class StableDiffusionDataModule(BaseDataModule[SDSample, SDBatch, StableDiffusionModule, _TFSample]):
+class StableDiffusionDataModule(
+    BaseDataModule[SDSample, SDBatch, StableDiffusionModule, _TFSample]
+):
     sample_type = SDSample
     batch_type = SDBatch
     module_type = StableDiffusionModule
 
-    default_sample_size : tuple[int,int] = (256,256)
-    default_padding_strategy: PaddingStrategy= PaddingStrategy.LONGEST
+    default_sample_size: tuple[int, int] = (256, 256)
+    default_padding_strategy: PaddingStrategy = PaddingStrategy.LONGEST
 
     def __init__(
         self,
         # --- General args ---
-        dataset_factory: Callable[...,DatasetType[SDSample]] |None  = None,
+        dataset_factory: Callable[..., DatasetType[SDSample]] | None = None,
         *,
-        dataset:DatasetType[SDSample] |None = None,
+        dataset: DatasetType[SDSample] | None = None,
         train_ratio: float = 0.8,
         num_workers: int = 8,
         batch_size=8,
-
         # --- Specific args ---
-        sample_size: int|tuple[int,int]|None=None,
-        padding_strategy: PaddingStrategy|None = None
+        sample_size: int | tuple[int, int] | None = None,
+        padding_strategy: PaddingStrategy | None = None,
     ):
         """
 
@@ -524,14 +576,24 @@ class StableDiffusionDataModule(BaseDataModule[SDSample, SDBatch, StableDiffusio
             num_workers:
             batch_size:
         """
-        super().__init__(dataset_factory, dataset=dataset, train_ratio=train_ratio, num_workers=num_workers, batch_size=batch_size)
+        super().__init__(
+            dataset_factory,
+            dataset=dataset,
+            train_ratio=train_ratio,
+            num_workers=num_workers,
+            batch_size=batch_size,
+        )
         # If None, assign when trainer is assigned (in `setup`).
         self.sample_size = sample_size
         self.padding_strategy = padding_strategy
-        self._image_transform: Callable[[Image.Image|Sequence[Image.Image]], torch.Tensor] | None = None
-        self._text_transform: Callable[[str|Sequence[str]], torch.Tensor] |None = None
+        self._image_transform: (
+            Callable[[Image.Image | Sequence[Image.Image]], torch.Tensor] | None
+        ) = None
+        self._text_transform: Callable[[str | Sequence[str]], torch.Tensor] | None = (
+            None
+        )
 
-    def _setup_with_module_and_dataset(self)->None:
+    def _setup_with_module_and_dataset(self) -> None:
         tokenizer = self.module.tokenizer
         self.padding_strategy = self.padding_strategy or self.default_padding_strategy
         self._text_transform = _get_text_transform(tokenizer, self.padding_strategy)
@@ -548,7 +610,7 @@ class StableDiffusionDataModule(BaseDataModule[SDSample, SDBatch, StableDiffusio
                     f"`sample_size` was not given, use `{self.module_type.__name__}.sample_size`={sample_size} for constructing transform."
                 )
                 self.sample_size = sample_size
-        self._image_transform =  transforms.Compose(
+        self._image_transform = transforms.Compose(
             [
                 transforms.Resize(self.sample_size),
                 transforms.RandomHorizontalFlip(),
@@ -556,20 +618,19 @@ class StableDiffusionDataModule(BaseDataModule[SDSample, SDBatch, StableDiffusio
                 transforms.ToDtype(
                     dtype=torch.get_default_dtype(), scale=True
                 ),  # convert PIL → tensor [0,1]
-                transforms.Normalize([0.5], [0.5])  # map [0,1] → [-1,1]
+                transforms.Normalize([0.5], [0.5]),  # map [0,1] → [-1,1]
             ]
         )
 
-    def _sample_transform(self, sample: SDSample) ->_TFSample:
+    def _sample_transform(self, sample: SDSample) -> _TFSample:
         assert callable(self._image_transform)
         return _TFSample(
-            text=sample["text"],
-            image = self._image_transform(sample["image"])
+            text=sample["text"], image=self._image_transform(sample["image"])
         )
 
-    def _collate_fn(self, samples: Sequence[_TFSample]) -> SDBatch :
+    def _collate_fn(self, samples: Sequence[_TFSample]) -> SDBatch:
         assert callable(self._text_transform)
         return self.batch_type(
-            input_ids = self._text_transform([sample["text"] for sample in samples]),
-            images = torch.stack([sample["image"] for sample in samples])
+            input_ids=self._text_transform([sample["text"] for sample in samples]),
+            images=torch.stack([sample["image"] for sample in samples]),
         )
