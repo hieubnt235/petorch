@@ -1,13 +1,14 @@
+import multiprocessing
 from abc import ABC, abstractmethod
 from types import MethodType
-from typing import Callable, Protocol, TypeVar, Generic, Iterator, cast, Self, TypeAlias, \
-    Sequence, Any
+from typing import Callable, Protocol, TypeVar, Generic, Iterator, cast, Self, TypeAlias, Sequence, Any, Optional, \
+    Union, Iterable
 
 import torch
 from lightning import LightningDataModule, LightningModule
 from lightning.pytorch.trainer.states import TrainerFn
 from pydantic import BaseModel, ConfigDict
-from torch.utils.data import DataLoader as TorchDataLoader, Dataset as TorchDataset, random_split
+from torch.utils.data import DataLoader as TorchDataLoader, Dataset as TorchDataset, random_split, Sampler
 
 from petorch import logger
 
@@ -45,13 +46,14 @@ TFSample_T= TypeVar("TFSample_T")
 Module_T = TypeVar("Module_T", bound=LightningModule, covariant=True)
 SampleTransform: TypeAlias = Callable[[Sample_T], TFSample_T]
 
-class DatasetType(Protocol[Sample_T]):
-    def __getitem__(self, index: int) -> Sample_T:
+DatasetSample_T = TypeVar("DatasetSample_T", covariant=True)
+class DatasetType(Protocol[DatasetSample_T]):
+    def __getitem__(self, index: int) -> DatasetSample_T:
         ...
     def __len__(self) -> int:
         ...
 
-class TransformWrapperDataset(TorchDataset[Sample_T]):
+class TransformWrapperDataset(TorchDataset[TFSample_T], Generic[Sample_T, TFSample_T]):
 
     def __init__(self, dataset: DatasetType[Sample_T], sample_transform: SampleTransform[Sample_T, TFSample_T]):
         self.dataset = dataset
@@ -63,7 +65,49 @@ class TransformWrapperDataset(TorchDataset[Sample_T]):
     def __len__(self)->int:
         return len(self.dataset)
 
-class DataLoader(TorchDataLoader[Sample_T], Generic[Sample_T, Batch_T]):
+class DataLoader(TorchDataLoader[TFSample_T], Generic[TFSample_T, Batch_T]):
+    # Redefine for typehint and add new generics to the Dataset and collate_fn.
+    def __init__(
+        self,
+        dataset: TorchDataset[TFSample_T],
+        batch_size: Optional[int] = 1,
+        shuffle: Optional[bool] = None,
+        sampler: Union[Sampler[Any], Iterable[Any], None] = None,
+        batch_sampler: Union[Sampler[list[Any]], Iterable[list[Any]], None] = None,
+        num_workers: int = 0,
+        collate_fn: Callable[[Sequence[TFSample_T]], Batch_T] | None = None,
+        pin_memory: bool = False,
+        drop_last: bool = False,
+        timeout: float = 0,
+        worker_init_fn: Callable[[int], None]|None = None,
+        multiprocessing_context: str| multiprocessing.context.BaseContext|None=None,
+        generator: torch.Generator|None=None,
+        *,
+        prefetch_factor: Optional[int] = None,
+        persistent_workers: bool = False,
+        pin_memory_device: str = "",
+        in_order: bool = True,
+
+    ):
+        super().__init__(
+            dataset=dataset,
+            batch_size=batch_size,
+            shuffle=shuffle,
+            sampler=sampler,
+            batch_sampler=batch_sampler,
+            num_workers=num_workers,
+            collate_fn=collate_fn,
+            pin_memory=pin_memory,
+            drop_last=drop_last,
+            timeout=timeout,
+            worker_init_fn=worker_init_fn,
+            multiprocessing_context=multiprocessing_context,
+            generator=generator,
+            prefetch_factor=prefetch_factor,
+            persistent_workers=persistent_workers,
+            pin_memory_device=pin_memory_device,
+        )
+    
     def __iter__(self) -> Iterator[Batch_T]: # type: ignore[override]
         return cast(Iterator[Batch_T], super().__iter__())
 
@@ -77,7 +121,7 @@ class BaseDataModule(LightningDataModule, Generic[Sample_T,Batch_T, Module_T, TF
     This have no affect at runtime, just ignore it.
     """
 
-    def __init_subclass__(cls, **kwargs)->None:
+    def __init_subclass__(cls, **kwargs:dict[str,Any])->None:
         assert hasattr(cls, "sample_type"),"`sample_type` must be specified."
         # assert issubclass(bt:=getattr(cls,"batch_type"), DataBatch), f"`batch_type` must be subclass of `DataBatch`. Got {type(bt)}."
 
@@ -116,7 +160,7 @@ class BaseDataModule(LightningDataModule, Generic[Sample_T,Batch_T, Module_T, TF
             self.val_dataset: DatasetType[Sample_T] | None = None
 
             # Patch it
-            def _f(obj: BaseDataModule[Sample_T,Batch_T, Module_T, TFSample_T])->DataLoader[Sample_T,Batch_T]:
+            def _f(obj: BaseDataModule[Sample_T,Batch_T, Module_T, TFSample_T])->DataLoader[TFSample_T,Batch_T]:
                 assert obj.val_dataset is not None
                 return obj._return_dataloader(obj.val_dataset)
             self.val_dataloader = MethodType(_f, self)
@@ -151,11 +195,11 @@ class BaseDataModule(LightningDataModule, Generic[Sample_T,Batch_T, Module_T, TF
     def _sample_transform(self, sample: Sample_T)->TFSample_T:
         """Override this method to provide sample transform function, also known as transform."""
         assert self
-        return sample
+        return cast(TFSample_T,sample)
 
     @abstractmethod
     def _collate_fn(self, samples: Sequence[TFSample_T])->Batch_T:
-        """Override this method to provide collation function, also known as batch transform."""
+        """Override this method to provide a collation function, also known as batch transform."""
         ...
 
     # ---- Lightning hooks ----
@@ -186,8 +230,8 @@ class BaseDataModule(LightningDataModule, Generic[Sample_T,Batch_T, Module_T, TF
         self._setup_with_module_and_dataset()
 
 
-    def _return_dataloader(self, dataset:DatasetType[Sample_T]) -> DataLoader[Sample_T,Batch_T]:
-        return DataLoader[Sample_T, Batch_T](
+    def _return_dataloader(self, dataset:DatasetType[Sample_T]) -> DataLoader[TFSample_T,Batch_T]:
+        return DataLoader(
             TransformWrapperDataset(dataset,self._sample_transform),
             batch_size=self.batch_size,
             num_workers=self.num_workers,
@@ -195,7 +239,7 @@ class BaseDataModule(LightningDataModule, Generic[Sample_T,Batch_T, Module_T, TF
             drop_last=True,
         )
 
-    def train_dataloader(self) -> DataLoader[Sample_T,Batch_T]:
+    def train_dataloader(self) -> DataLoader[TFSample_T,Batch_T]:
         assert self.train_dataset is not None
         return self._return_dataloader(self.train_dataset)
 
