@@ -113,6 +113,7 @@ class PredictionType(StrEnum):
 
 class MetricKey(StrEnum):
     TRAIN_LOSS = "train_loss"
+    TRAIN_STEP_LOSS = "train_step_loss"
     VAL_LOSS = "val_loss"
 
 
@@ -220,6 +221,7 @@ class StableDiffusionModule(LightningModule):
         feature_extractor: CLIPImageProcessor | None = None,
         optimizer_factory: None | OptimizerFactoryType = None,
         lr_scheduler_factory: None | LRSchedulerFactoryType = None,
+        prog_bar:bool = True,
         **addition_kwargs,
     ):
         """
@@ -311,9 +313,13 @@ class StableDiffusionModule(LightningModule):
         )
 
         # 5. Additions
+        self.prog_bar = prog_bar
         self.addition_kwargs = addition_kwargs
         self.optimizer_factory = optimizer_factory or default_optimizer_factory
         self.lr_scheduler_factory = lr_scheduler_factory or default_lr_scheduler_factory
+
+        self.total_train_steps: int = 0
+        """Will be set by `config_optimizers`"""
 
     @property
     def sample_size(self) -> int | tuple[int, int] | None:
@@ -442,11 +448,13 @@ class StableDiffusionModule(LightningModule):
         self.get_metric(mkey).update(loss, len(batch))
 
         # Note that when the value is logged in step hook, logger only received after `Trainer.log_in_every_n_steps`
-        self.log(
-            f"{mkey}_step",
-            loss,
+        self.log_dict(
+            {
+                MetricKey.TRAIN_STEP_LOSS: loss,
+                "progress(%)": self.global_step * 100 / self.total_train_steps,
+            },
             logger=True,
-            prog_bar=True,
+            prog_bar=self.prog_bar,
             on_step=True,
             on_epoch=False,
         )
@@ -464,7 +472,7 @@ class StableDiffusionModule(LightningModule):
                 MetricKey.TRAIN_LOSS: train_metric.compute(),
                 MetricKey.VAL_LOSS: val_metric.compute(),
             },
-            prog_bar=True,
+            prog_bar=self.prog_bar,
             logger=True,
             on_epoch=True,
             on_step=False,
@@ -520,6 +528,8 @@ class StableDiffusionModule(LightningModule):
         lr_scheduler = self.lr_scheduler_factory(
             optimizer, num_optim_steps, current_step
         )
+
+        self.total_train_steps = num_optim_steps
 
         return OptimizerLRSchedulerConfig(
             optimizer=optimizer, lr_scheduler=lr_scheduler

@@ -50,6 +50,9 @@ class ClearmlLogger(BaseLogger):
         task_type: "TaskTypes" = None,
         tags: Sequence[str] | None = None,
         output_uri: str = "https://files.clear.ml",
+        metric_title_split="_",
+        default_title="untitled metric",
+        rsplit_title:bool=True,
         **clearml_task_kwargs,
     ):
         """
@@ -76,9 +79,9 @@ class ClearmlLogger(BaseLogger):
         self._output_models: dict[str, "cml.OutputModel"] = {}
         """filepath: OutputModel"""
 
-        # This pattern adapts to some lightning loggers to ensure experiment created for all cases,
-        # such as when strategy=ddp_spawn.
-        # self._task: Optional["Task"] = None
+        self.metric_title_split = metric_title_split
+        self.default_title = default_title
+        self.rsplit_title = rsplit_title
 
         self._init_task() # This task init in rank 0 only.
 
@@ -165,9 +168,29 @@ class ClearmlLogger(BaseLogger):
     ) -> None:
         # clearml logger.report_scalar requires value to be float or int.
         for metric, value in metrics.items():
+            if self.rsplit_title:
+                splits = metric.rsplit( self.metric_title_split,1)
+            else:
+                splits = metric.split(self.metric_title_split, 1)
+
+            if len(splits) != 2:
+                # "loss"
+                title = self.default_title
+                series = metric
+            else:
+                if self.rsplit_title:
+                    series, title = splits
+                else:
+                    title, series = splits
+
+                if not series or not title:
+                    # metric is something like "loss_" or "_loss"
+                    title = self.default_title
+                    series = metric
+
             self.experiment.logger.report_scalar(
-                title=metric,
-                series=metric,
+                title=title,
+                series=series,
                 value=value.item() if isinstance(value, Tensor) else value,
                 iteration=step,
             )

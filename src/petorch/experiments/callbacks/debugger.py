@@ -87,6 +87,7 @@ class ClearmlImageDebugger(SampleDebugger):
         every_n_epochs: int = 5,
         every_n_train_steps: int|None=None,
         clearml_logger: ClearmlLogger = None,
+        images_title: str="Images",
         **kwargs,
     ):
         """
@@ -100,6 +101,7 @@ class ClearmlImageDebugger(SampleDebugger):
         """
         super().__init__(every_n_epochs=every_n_epochs, every_n_train_steps = every_n_train_steps,*args, **kwargs)
         self.cml_logger = clearml_logger
+        self.images_title = images_title
 
     def store_sample(
         self, images: ImageType| Sequence[ImageType], trainer: "pl.Trainer", pl_module: "pl.LightningModule"
@@ -131,8 +133,8 @@ class ClearmlImageDebugger(SampleDebugger):
                     info = f"Numpy image: dtype={img.dtype}, shape={img.shape}"
 
                 cml_logger.experiment.logger.report_image(
-                    f"Image samples",
-                    f"step_{trainer.global_step}_epoch_{trainer.current_epoch}_idx_{i}",
+                    self.images_title,
+                    f"step={trainer.global_step}-epoch={trainer.current_epoch}-idx={i}",
                     image=img
                 )
                 logger.info(f"Reporting image...{info}")

@@ -101,7 +101,7 @@ def setup_logger(level=None):
     #     format=DEFAULT_LOGGER_FORMAT
     # )
     logger.add(
-        lambda msg: tqdm.write(msg, end=""),
+        lambda msg: tqdm.write(msg, file=sys.stderr, end=""),
         level=level,
         filter = log_filter,
         format=DEFAULT_LOGGER_FORMAT,
