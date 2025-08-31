@@ -1,0 +1,2 @@
+from petorch.modules.diffusions.stable_diffusion import StableDiffusionDataModule
+

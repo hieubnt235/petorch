@@ -45,3 +45,4 @@ def b64encode(x: str) -> str:
 def b64decode(y: str) -> str:
     """Decode base64-safe string back into original string."""
     return base64.urlsafe_b64decode(y.encode()).decode()
+
