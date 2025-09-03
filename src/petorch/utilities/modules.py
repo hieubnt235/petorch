@@ -62,7 +62,9 @@ class DummyV2(nn.Module):
     ):
         super().__init__()
         self.embedding = nn.Embedding(vocab_size, embedding_dim)
-        self.conv = nn.Conv2d(in_channels=1, out_channels=16, kernel_size=3, padding='same')
+        self.conv = nn.Conv2d(
+            in_channels=1, out_channels=16, kernel_size=3, padding="same"
+        )
         self.bn = nn.BatchNorm2d(16)
         self.relu = nn.ReLU()
         self.flatten = nn.Flatten()
@@ -89,7 +91,7 @@ class ParamWrapper(nn.Module):
         bias: torch.Tensor | nn.Parameter | None = None,
     ):
         super().__init__()
-        
+
         self.weight = (
             nn.Parameter(weight) if isinstance(weight, torch.Tensor) else weight
         )
@@ -108,4 +110,3 @@ class ParamWrapper(nn.Module):
 
     def forward(self, *args, **kwargs) -> Any:
         raise NotImplementedError
-

@@ -7,13 +7,8 @@ from torch import nn
 from .base import BaseLoraAdapter
 
 
-class LoraLinear(BaseLoraAdapter):
+class LoraLinear(BaseLoraAdapter[nn.Linear]):
     base_layer_class = nn.Linear
-
-    @property
-    def base_layer(self) -> nn.Linear:
-        # Override for typed hint.
-        return cast(nn.Linear, super().base_layer)
 
     def _init_lora_layers(self) -> None:
         self.lora_A = nn.Linear(self.base_layer.in_features, self.rank, bias=False)

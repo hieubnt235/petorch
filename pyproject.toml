@@ -12,7 +12,7 @@ authors = [
     { name = "hieu", email = "hieu.buinguyen2352001@gmail.com" }
 ]
 
-requires-python = ">=3.13"
+requires-python = ">=3.12"
 
 dependencies = [
     "accelerate>=1.8.1",

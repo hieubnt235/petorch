@@ -11,7 +11,7 @@ from petorch.adapter import (
 )
 from petorch.prebuilt.adapters.lora import (
     LoraLinear,
-    LoraAdaptedLayer,
+    AdaptedLayer,
     BaseLoraAdapter,
     LoraEmbedding,
     LoraConv1d,
@@ -75,4 +75,4 @@ class LoraConfig(BaseModelAdaptionConfig):
     def dispatch_adapted_layer(
         self, fqname: str, base_layer: nn.Module, *args, **kwargs
     ) -> BaseAdaptedLayer:
-        return LoraAdaptedLayer(base_layer, *args, **kwargs)
+        return AdaptedLayer(base_layer, *args, **kwargs)

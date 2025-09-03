@@ -5,7 +5,7 @@ import pytest
 import torch
 from torch import nn
 
-from petorch.prebuilt.adapters.lora import LoraAdaptedLayer, LoraEmbedding
+from petorch.prebuilt.adapters.lora import AdaptedLayer, LoraEmbedding
 from petorch.prebuilt.configs import LoraConfig
 from petorch.utilities import TorchInitMethod
 
@@ -57,7 +57,7 @@ def test_lora_embedding_single_adapter(config: LoraConfig, sample: torch.Tensor)
     adapted_layer._add_adapters(zero_init_adapter, activate=False)
     adapted_layer.eval()  # IMPORTANT: MUST SWAP TO EVAL AFTER CHANGE ARCHITECTURE.
 
-    assert isinstance(adapted_layer, LoraAdaptedLayer)
+    assert isinstance(adapted_layer, AdaptedLayer)
 
     # For non-activated adapter case, adapted_layer and base_layer output is the same
     output = adapted_layer(sample)
@@ -171,9 +171,9 @@ def test_lora_embedding_multi_adapters(sample, configs):
     adapter_names = [adapter.name for adapter in adapters]
 
     adapted_layer = cast(
-        LoraAdaptedLayer, configs[0].dispatch_adapted_layer(fqname, base_layer)
+        AdaptedLayer, configs[0].dispatch_adapted_layer(fqname, base_layer)
     )
-    assert isinstance(adapted_layer, LoraAdaptedLayer)
+    assert isinstance(adapted_layer, AdaptedLayer)
 
     # None activated adapter cases
     adapted_layer._add_adapters(adapters, activate=False)

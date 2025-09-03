@@ -1,4 +1,4 @@
-from typing import cast, Literal
+from typing import cast, Literal, override
 
 import torch
 import torch.nn.functional as F
@@ -9,13 +9,10 @@ from petorch.utilities import ParamWrapper
 from .base import BaseLoraAdapter, LoraAdapterConfig
 
 
-class LoraEmbedding(BaseLoraAdapter):
+class LoraEmbedding(BaseLoraAdapter[nn.Embedding]):
     base_layer_class = nn.Embedding
 
-    @property
-    def base_layer(self) -> nn.Embedding:
-        return cast(nn.Embedding, super().base_layer)
-
+    @override
     def _init_lora_layers(self) -> None:
         bl = self.base_layer
         self.lora_A = ParamWrapper(weight=torch.empty([bl.num_embeddings, self.rank]))
@@ -24,14 +21,15 @@ class LoraEmbedding(BaseLoraAdapter):
             None,
             None,
         )
-        self.config.bias=False # Todo: this step should be in init method for more clean in purpose of this method.
+        self.config.bias = False  # Todo: this step should be in init method for more clean in purpose of this method.
         assert not self.is_bias
 
+    @override
     def reset_parameters(self):
         nn.init.zeros_(self.lora_A.weight)
         nn.init.normal_(self.lora_B.weight)
-        
 
+    @override
     def get_delta_weight(self) -> torch.Tensor:
         # The weight shape of nn.Embedding is (num_embeddings, embedding_dim) and forward is
         # return F.embedding(input, self.weight,...)
@@ -47,6 +45,7 @@ class LoraEmbedding(BaseLoraAdapter):
         assert delta_weight.shape == self.base_layer.weight.shape
         return delta_weight
 
+    @override
     def get_delta(self, batch_input: torch.Tensor) -> torch.tensor:
         bl = self.base_layer
         # noinspection PyTypeChecker

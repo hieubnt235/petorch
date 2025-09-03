@@ -1,57 +1,30 @@
 # Three main APIs
-__all__=[
-    "StableDiffusionModule",
-    "StableDiffusionDataModule",
-    "SDSample"
-]
+__all__ = ["StableDiffusionModule", "StableDiffusionDataModule", "SDSample"]
 
 from enum import StrEnum
-from typing import (
-    Callable,
-    cast,
-    Iterator,
-    Sequence,
-    Any,
-    TypedDict,
-)
+from typing import (Callable, cast, Iterator, Sequence, Any, TypedDict, )
 from typing import Self, Literal
 
 import PIL
 import numpy as np
 import torch
-
 # TODO: AWARE OF RANK 0 LOG
 import torchvision.transforms.v2 as transforms
 from PIL import Image
-from diffusers import (
-    StableDiffusionPipeline,
-    AutoencoderKL,
-    UNet2DConditionModel,
-    DDIMScheduler,
-    DDPMScheduler,
-)
+from diffusers import (StableDiffusionPipeline, AutoencoderKL, UNet2DConditionModel, DDIMScheduler, DDPMScheduler, )
 from diffusers.models.autoencoders.vae import DiagonalGaussianDistribution
 from diffusers.models.unets.unet_2d_condition import UNet2DConditionOutput
 from diffusers.optimization import get_cosine_schedule_with_warmup
 from lightning import LightningModule
 from lightning.pytorch.trainer.states import TrainerFn
-from lightning.pytorch.utilities.types import (
-    STEP_OUTPUT,
-    OptimizerLRScheduler,
-    OptimizerLRSchedulerConfig,
-    LRSchedulerConfigType,
-)
+from lightning.pytorch.utilities.types import (STEP_OUTPUT, OptimizerLRScheduler, OptimizerLRSchedulerConfig,
+                                               LRSchedulerConfigType, )
 from pydantic import model_validator
 from torch import Tensor, IntTensor, FloatTensor
 from torch import nn
 from torch.optim import Optimizer
 from torchmetrics import MeanMetric, Metric
-from transformers import (
-    CLIPTokenizer,
-    CLIPTextModel,
-    CLIPTokenizerFast,
-    CLIPImageProcessor,
-)
+from transformers import (CLIPTokenizer, CLIPTextModel, CLIPTokenizerFast, CLIPImageProcessor, )
 from transformers import PreTrainedTokenizerBase
 from transformers.modeling_outputs import BaseModelOutputWithPooling
 from transformers.utils import PaddingStrategy
@@ -185,9 +158,9 @@ class StableDiffusionModule(LightningModule):
         scheduler:
 
     You can override all methods defined on this class to customize for your case.
-    
+
     Training process:
-    
+
         # 1. Encode input image to latent space
         latent = VAE.encode(image) # shape [B, C, H, W]
 
@@ -221,7 +194,7 @@ class StableDiffusionModule(LightningModule):
         feature_extractor: CLIPImageProcessor | None = None,
         optimizer_factory: None | OptimizerFactoryType = None,
         lr_scheduler_factory: None | LRSchedulerFactoryType = None,
-        prog_bar:bool = True,
+        prog_bar: bool = True,
         **addition_kwargs,
     ):
         """

@@ -9,7 +9,7 @@ from torch import Tensor, nn
 from torch.utils.hooks import RemovableHandle
 
 from petorch.adapter import BaseAdapter, AdapterAPI, BaseAdaptedLayer
-from petorch.prebuilt.adapters.lora import LoraLinear, LoraAdaptedLayer, BaseLoraAdapter
+from petorch.prebuilt.adapters.lora import LoraLinear, AdaptedLayer, BaseLoraAdapter
 from petorch.prebuilt.configs import LoraConfig
 from petorch.utilities import TorchInitMethod, DummyV2
 from petorch.utilities.modules import NestedDummy, Dummy
@@ -181,7 +181,7 @@ def test_manipulate_multi_adapters(configs, model_cls):
         adapted_layer := model.get_submodule(
             adapted_fqn[randint(0, len(adapted_fqn) - 1)]
         ),
-        LoraAdaptedLayer,
+        AdaptedLayer,
     )  # Get any adapted layer. Note that this layer is already tested in `test_api`.Just get for monitoring.
 
     # None activated adapter cases
@@ -198,7 +198,7 @@ def test_manipulate_multi_adapters(configs, model_cls):
     AdapterAPI.activate_adapter(model, adapter_names, activate=True)
     for fqn in adapted_fqn:
         al = model.get_submodule(fqn)
-        assert isinstance(al, LoraAdaptedLayer)
+        assert isinstance(al, AdaptedLayer)
         assert (
             len(adapted_layer.active_adapters)
             == len(adapted_layer.adapter_names)
@@ -361,7 +361,7 @@ def test_merge_api(configs: list[LoraConfig], sample: torch.Tensor, model_cls):
         current_adapted_fqn = 0
         for name, module in model.named_modules():
             # Check for all current adapted layers
-            if isinstance(module, LoraAdaptedLayer):
+            if isinstance(module, AdaptedLayer):
                 assert name in adapted_fqns
                 if is_activated:
                     assert (
@@ -401,7 +401,7 @@ def test_merge_api(configs: list[LoraConfig], sample: torch.Tensor, model_cls):
         adapted_layer := model.get_submodule(
             adapted_fqns[randint(0, len(adapted_fqns) - 1)]
         ),
-        LoraAdaptedLayer,
+        AdaptedLayer,
     )  # Get any adapted layer. Note that this layer is already tested in `test_api`.Just get for monitoring.
 
     # None-activated-adapter case
@@ -550,7 +550,7 @@ def test_get_and_load_state_dict_apis(
 
     # All adapter weights according to the adapted fqn are available in state_dict.
     key_fmt = "{adt_fqn}.{adt_key}.{adt_name}.{lora_X}.{wnb}"
-    adt_keys = [LoraAdaptedLayer.act_adt_key, LoraAdaptedLayer.non_act_adt_key]
+    adt_keys = [AdaptedLayer.act_adt_key, AdaptedLayer.non_act_adt_key]
 
     configs_dict = {config.adapter_name: config for config in configs}
     assert configs_dict == AdapterAPI.get_adaption_configs(model)

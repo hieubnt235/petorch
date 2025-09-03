@@ -9,14 +9,15 @@ from typing import (
     Optional,
     Union,
     Sequence,
-    cast, TYPE_CHECKING,
+    cast,
+    TYPE_CHECKING,
 )
 
 from lightning import LightningModule
 from lightning.fabric.loggers.logger import rank_zero_experiment
 from lightning.pytorch.callbacks import ModelCheckpoint
 from lightning.pytorch.utilities.model_summary import summarize
-from lightning.pytorch.utilities.rank_zero import rank_zero_only, rank_zero_info
+from lightning.pytorch.utilities.rank_zero import rank_zero_only
 from torch import Tensor
 from torch.nn import Module
 
@@ -26,9 +27,12 @@ from ...utilities import b64encode
 
 if TYPE_CHECKING:
     import clearml as cml
-    from clearml.backend_interface.task.models import TaskModels
+    import clearml.backend_interface.task.models as cml_models
+
+    TaskModels = cml_models.TaskModels
     Task = cml.Task
     TaskTypes = cml.TaskTypes
+
 
 class ClearmlLogger(BaseLogger):
     """
@@ -42,7 +46,7 @@ class ClearmlLogger(BaseLogger):
         self,
         log_model_checkpoint: bool = True,
         checkpoint_path: str = "checkpoints",  # Will be concat with dirpath_id of checkpoint model.
-        encode_dirpath:bool=True,
+        encode_dirpath: bool = True,
         *,
         # clearml.Task args
         project_name: str | None = None,
@@ -52,7 +56,7 @@ class ClearmlLogger(BaseLogger):
         output_uri: str = "https://files.clear.ml",
         metric_title_split="_",
         default_title="untitled metric",
-        rsplit_title:bool=True,
+        rsplit_title: bool = True,
         **clearml_task_kwargs,
     ):
         """
@@ -68,7 +72,7 @@ class ClearmlLogger(BaseLogger):
 
         self._project_name = project_name
         self._task_name = task_name
-        self._task_type =  cast(TaskTypes,task_type or TaskTypes.training)
+        self._task_type = cast(TaskTypes, task_type or TaskTypes.training)
         self._tags = tags
         self._output_uri = output_uri
         self._clearml_task_kwargs = clearml_task_kwargs
@@ -83,33 +87,36 @@ class ClearmlLogger(BaseLogger):
         self.default_title = default_title
         self.rsplit_title = rsplit_title
 
-        self._init_task() # This task init in rank 0 only.
+        self._init_task()  # This task init in rank 0 only.
 
     @rank_zero_only
     def _init_task(self):
         """This method only be called in rank 0"""
         from clearml import Task
+
         Task.init(
             project_name=self._project_name,
             task_name=self._task_name,
             task_type=self._task_type,
             tags=self._tags,
             output_uri=self._output_uri,
-            auto_connect_frameworks={"pytorch": False}, # Use manually only
+            auto_connect_frameworks={"pytorch": False},  # Use manually only
             **self._clearml_task_kwargs,
         )
-        logger.info(f"Clearml Task initialized.") # This log must ony exist one in the console (rank 0 only)
+        logger.info(
+            f"Clearml Task initialized."
+        )  # This log must ony exist one in the console (rank 0 only)
 
     @rank_zero_experiment
-    def _get_task(self)->"Task":
+    def _get_task(self) -> "Task":
         from clearml import Task
 
         curr_task = Task.current_task()
         if curr_task is None:
-            self._init_task() # Rank zero only
+            self._init_task()  # Rank zero only
             curr_task = Task.current_task()
         assert isinstance(curr_task, Task)
-        return  curr_task
+        return curr_task
 
     @property
     def experiment(self) -> "Task":
@@ -128,7 +135,9 @@ class ClearmlLogger(BaseLogger):
 
         task = self._get_task()
         # If rank > 0, return Dummy
-        logger.debug(f"`experiment` property return with type: {task.__class__.__name__}")
+        logger.debug(
+            f"`experiment` property return with type: {task.__class__.__name__}"
+        )
         return task
 
     @property
@@ -169,7 +178,7 @@ class ClearmlLogger(BaseLogger):
         # clearml logger.report_scalar requires value to be float or int.
         for metric, value in metrics.items():
             if self.rsplit_title:
-                splits = metric.rsplit( self.metric_title_split,1)
+                splits = metric.rsplit(self.metric_title_split, 1)
             else:
                 splits = metric.split(self.metric_title_split, 1)
 
@@ -211,7 +220,7 @@ class ClearmlLogger(BaseLogger):
                 "model_summary.txt",
                 f.name,
                 delete_after_upload=True,
-                wait_on_upload=True
+                wait_on_upload=True,
             )
 
     @rank_zero_only
@@ -240,9 +249,9 @@ class ClearmlLogger(BaseLogger):
         local_path = Path(local_path)
         assert local_path.exists()
         if self._encode_dirpath:
-            save_path =f"{b64encode(local_path.parent.as_posix())}/{local_path.name}"
+            save_path = f"{b64encode(local_path.parent.as_posix())}/{local_path.name}"
         else:
-            save_path =local_path.name
+            save_path = local_path.name
         return Path(self._checkpoint_path).joinpath(save_path).as_posix()
 
     @rank_zero_only
@@ -258,17 +267,17 @@ class ClearmlLogger(BaseLogger):
 
             assert Path(saved_filepath).exists()
 
-            meta: dict[str, Any] = {
-                "filepath": {type(v := saved_filepath): v}
-            }
+            meta: dict[str, Any] = {"filepath": {type(v := saved_filepath): v}}
             """dict[str, dict[str, str]. keys, types and values."""
 
             if saved_filepath in best_k_models:
                 assert checkpoint_callback.monitor is not None
-                meta[checkpoint_callback.monitor] = {type(v:=best_k_models[saved_filepath].item()): v}
+                meta[checkpoint_callback.monitor] = {
+                    type(v := best_k_models[saved_filepath].item()): v
+                }
                 tags = ["best_k"]
             elif saved_filepath == last_model_path:
-                meta["last"] = {type(v:=True): v}
+                meta["last"] = {type(v := True): v}
                 tags = ["last"]
             else:
                 logger.warning(
@@ -299,13 +308,15 @@ class ClearmlLogger(BaseLogger):
                 )
                 _om.tags = tags
                 _om.set_all_metadata(meta, replace=True)
-                logger.info(f"Uploaded new checkpoint successfully:\n"
-                            f"Local path={saved_filepath}\n"
-                            f"Model name={_om.name}\n"
-                            f"Model id={_om.id}\n"
-                            f"Mode uri={uri}\n"
-                            f"Model tags={_om.tags}")
-                
+                logger.info(
+                    f"Uploaded new checkpoint successfully:\n"
+                    f"Local path={saved_filepath}\n"
+                    f"Model name={_om.name}\n"
+                    f"Model id={_om.id}\n"
+                    f"Mode uri={uri}\n"
+                    f"Model tags={_om.tags}"
+                )
+
             except Exception as e:
                 logger.error(e)
 
@@ -331,9 +342,10 @@ class ClearmlLogger(BaseLogger):
                                 f"Remove model fails (partial remove): `name={model.name}`, `id={model.id}`."
                             )
                         # self._output_models.pop(filepath)
-                        logger.info(f"Remove old checkpoint successfully:\n"
-                                    f" `name={model.name}`, `id={model.id}`."
-                                    )
+                        logger.info(
+                            f"Remove old checkpoint successfully:\n"
+                            f" `name={model.name}`, `id={model.id}`."
+                        )
                     except ValueError as e:
                         logger.error(e)
 
@@ -342,22 +354,27 @@ class ClearmlLogger(BaseLogger):
                     # raise error `Could not find model id=...`
                     self._output_models.pop(filepath)
 
-            logger.debug(f"Checkpoints in repo after save new checkpoint:\n {pprint.pformat(self.task_models)}")
-            logger.debug(f"Output Models cache filepath: \n{pprint.pformat(self._output_models)}")
-
+            logger.debug(
+                f"Checkpoints in repo after save new checkpoint:\n {pprint.pformat(self.task_models)}"
+            )
+            logger.debug(
+                f"Output Models cache filepath: \n{pprint.pformat(self._output_models)}"
+            )
 
     def __getstate__(self) -> Union[str, None]:
         from clearml import Task
+
         if isinstance(self.experiment, Task):
             return self.experiment.id
 
     def __setstate__(self, state: str) -> None:
         from clearml import Task
+
         if state:
             task = Task.get_task(state)
             self._project_name = task.project
-            self._task_name = task.name,
+            self._task_name = (task.name,)
             self._task_type = task.task_type
             self._tags = task.get_tags()
-            self._output_uri = task.output_uri,
+            self._output_uri = (task.output_uri,)
             self._init_task()

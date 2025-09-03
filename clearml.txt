@@ -1,0 +1,10 @@
+api {
+  # hieu buinguyen's workspace
+  web_server: https://app.clear.ml/
+  api_server: https://api.clear.ml
+  files_server: https://files.clear.ml
+  credentials {
+    "access_key" = "Q16SLNAJMTKDXWIYRML07KB7VADN5J"
+    "secret_key" = "BElHMdt8rbBT_R9dqS9QTfS9NKK61io_O-Kq7AST0xnXLyr-2XWS21QbZoqtIagJ2Bg"
+  }
+}

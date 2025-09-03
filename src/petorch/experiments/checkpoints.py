@@ -81,7 +81,7 @@ class ModelCheckpoint(pl_callbacks.ModelCheckpoint):
             storage_options: This will be passed to CheckpointIO, and you can customize the logic of saving depends on this.
              Useful for the case you save multiple checkpoints, and they have different expected storage.
              If `True` or given any object, pass the `locals()` of the `_save_checkpoint` method.
-             
+
             Notes:
                 `storage_options` must be False or None if the training strategy is not DDP or SingleDevice, or will raise an error.
 
@@ -160,7 +160,8 @@ def torch_save_checkpoint(checkpoint: dict[str, Any], path: str):
         f.write(buffer.getvalue())
 
 
-def torch_load_checkpoint(path: _PATH, map_location: Optional[Any] = None
+def torch_load_checkpoint(
+    path: _PATH, map_location: Optional[Any] = None
 ) -> dict[str, Any]:
     return _load(path, map_location)
 
@@ -202,7 +203,7 @@ class DefaultCheckpointIO(PLCheckpointIO):
     Notes:
         CheckpointIO only be use if train strategy is DDP or SingleDevice.
     """
-    
+
     def save_checkpoint(
         self,
         checkpoint: dict[str, Any],
@@ -281,4 +282,3 @@ def create_metric_checkpoint_callback(
         save_on_train_epoch_end=True,
         save_weights_only=True,
     )
-

@@ -2,10 +2,12 @@ import inspect
 import logging
 import os
 import sys
-from tqdm import tqdm
+
 import loguru
+from tqdm import tqdm
 
 logger = loguru.logger
+
 
 class InterceptHandler(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
@@ -18,8 +20,8 @@ class InterceptHandler(logging.Handler):
 
         frame, depth = inspect.currentframe(), 0
         while frame and (
-                frame.f_code.co_filename == logging.__file__
-                or frame.f_code.co_filename == __file__
+            frame.f_code.co_filename == logging.__file__
+            or frame.f_code.co_filename == __file__
         ):
             frame = frame.f_back
             depth += 1
@@ -32,13 +34,14 @@ class InterceptHandler(logging.Handler):
 logger_info_set = ["lightning", "clearml"]
 """Allow all logs with info level from these module are logged."""
 
-logger_debug_set = [__name__,"__main__", "petorch"]
+logger_debug_set = [__name__, "__main__", "petorch"]
 """Allow all logs with info level from these module are logged."""
 
-logger_modules_to_setup = ["lightning","transformers", "diffusions", "torch"]
+logger_modules_to_setup = ["lightning", "transformers", "diffusions", "torch"]
 """Loggers will be setup manually. If not in debug or info set, the default is warning level.
 The modules were chosen in info or debug set, must be append in this set, to refresh every setup.
 """
+
 
 def is_info_logger(name: str):
     names = name.split(".")
@@ -49,7 +52,8 @@ def is_debug_logger(name: str):
     names = name.split(".")
     return any(l in names for l in logger_debug_set)
 
-def setup_module_logger(logger_name:str):
+
+def setup_module_logger(logger_name: str):
     logger_ = logging.getLogger(logger_name)
     logger_.handlers.clear()
     logger_.setLevel(logging.DEBUG)
@@ -60,13 +64,17 @@ def setup_module_logger(logger_name:str):
     # logging.basicConfig(handlers=[InterceptHandler()], level=logging.NOTSET, force=True)
 
 
-DEFAULT_LOGGER_FORMAT = ("<green><b>[{time:YYYY-MM-DD HH:mm:ss.SSS}]</b></green> "
-                         "<level>[PID {process.id} | {level: <8}]</level> "
-                         "<cyan><i>{name}:{function}:{line} :~ </i></cyan> "
-                         "<level>{message}</level>"
-                         )
+DEFAULT_LOGGER_FORMAT = (
+    "<green><b>[{time:YYYY-MM-DD HH:mm:ss.SSS}]</b></green> "
+    "<level>[PID {process.id} | {level: <8}]</level> "
+    "<cyan><i>{name}:{function}:{line} :~ </i></cyan> "
+    "<level>{message}</level>"
+)
+
+
 def setup_logger(level=None):
-    level = level or os.getenv("LOG_LEVEL","INFO")
+    level = level or os.getenv("LOG_LEVEL", "INFO")
+
     def log_filter(record: "loguru.Record") -> bool:
         name = record.get("name")
         level_no = record["level"].no
@@ -103,11 +111,12 @@ def setup_logger(level=None):
     logger.add(
         lambda msg: tqdm.write(msg, file=sys.stderr, end=""),
         level=level,
-        filter = log_filter,
+        filter=log_filter,
         format=DEFAULT_LOGGER_FORMAT,
-        colorize=True
+        colorize=True,
     )
-    logger.info(f"Log level is set to `{level}`.")
+    logger.debug(f"Log level is set to `{level}`.")
     return logger
+
 
 setup_logger()

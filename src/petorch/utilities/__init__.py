@@ -36,3 +36,4 @@ class TorchInitMethod(Enum):
     trunc_normal = trunc_normal_
     orthogonal = orthogonal_
     sparse = sparse_
+

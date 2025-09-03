@@ -1,5 +1,5 @@
 import math
-from typing import Type, cast
+from typing import Type, cast, override
 
 import torch
 from torch import nn
@@ -8,17 +8,10 @@ from torch.nn.modules.conv import _ConvNd
 from .base import BaseLoraAdapter
 
 
-class LoraConvNd(BaseLoraAdapter):
+class LoraConvNd(BaseLoraAdapter[_ConvNd]):
     base_layer_class: Type[_ConvNd]
 
-    @property
-    def base_layer(self) -> _ConvNd:
-        return cast(_ConvNd, super().base_layer)
-
-    @property
-    def kernel_dim(self) -> int:
-        return self.base_layer.weight.dim()
-
+    @override
     def _init_lora_layers(self) -> None:
         bl = self.base_layer
         self.lora_A = self.base_layer_class(
@@ -29,6 +22,7 @@ class LoraConvNd(BaseLoraAdapter):
             self.rank, bl.out_channels, kernel_size, stride, bias=self.is_bias
         )
 
+    @override
     def get_delta_weight(self) -> torch.Tensor:
         assert isinstance(self.lora_A, self.base_layer_class) and isinstance(
             self.lora_B, self.base_layer_class
@@ -41,6 +35,10 @@ class LoraConvNd(BaseLoraAdapter):
         )
         assert delta_weight.shape == self.base_layer.weight.shape
         return delta_weight
+
+    @property
+    def kernel_dim(self) -> int:
+        return self.base_layer.weight.dim()
 
 
 class LoraConv1d(LoraConvNd):
