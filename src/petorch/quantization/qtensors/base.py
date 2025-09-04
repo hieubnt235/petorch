@@ -4,10 +4,10 @@ from typing import Any, Self, TypeVar, Generic, Callable, TypeAlias, Sequence, c
 
 import torch
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-from torch import Tensor, SymInt, dtype, layout, strided, device
+from torch import Tensor, SymInt, strided
 
-from petorch.utilities import fake_use
 from petorch import logger
+from petorch.utilities import fake_use
 
 
 class QTensorConfig(BaseModel):
@@ -20,9 +20,9 @@ class _WrapperState(BaseModel):
     strides: Sequence[int | SymInt] | None = None
     storage_offset: int | SymInt | None = None
     memory_format: torch.memory_format | None = None
-    dtype: dtype | None = None
-    layout: layout = strided
-    device: device | None = None
+    dtype: torch.dtype | None = None
+    layout: torch.layout = strided
+    device: torch.device | None = None
     pin_memory: bool = False
     requires_grad: bool = False
 
@@ -46,7 +46,7 @@ class QTensorState(BaseModel):
         arbitrary_types_allowed=True,
     )
     quant_tensors: dict[str, Tensor] = Field(default_factory=dict)
-    _wrapper_state: _WrapperState = Field(frozen=True)
+    _wrapper_state: _WrapperState
 
     @model_validator(mode="after")
     def _check(self) -> Self:
