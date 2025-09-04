@@ -85,4 +85,5 @@ def b64decode(y: str) -> str:
 
 
 def fake_use(*args: Any, **kwargs: Any) -> Any:
+    """Do nothing, just for suppressing warning."""
     return args, kwargs
