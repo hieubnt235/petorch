@@ -10,7 +10,7 @@ from typing import (
     Unpack,
     TypeVar,
     Generic,
-    Literal,
+    Literal, ClassVar,
 )
 
 import torch
@@ -163,6 +163,15 @@ class BaseAdaptedLayer(nn.Module, ABC, Generic[BaseModule_T]):
 
     act_adt_key: str = "active_adapters"
     non_act_adt_key: str = "non_active_adapters"
+    
+    @abstractmethod
+    def _validate_base_layer(self, base_layer: nn.Module):
+        """
+        Implement the logic for validating the base layer. Such as ensuring base_layer must have the attribute `weight`.
+        Args:
+            base_layer:
+        """
+        ...
 
     @abstractmethod
     def _update_base_layer(
@@ -181,10 +190,10 @@ class BaseAdaptedLayer(nn.Module, ABC, Generic[BaseModule_T]):
 
         """
         ...
-
+    
     def __init__(self, base_layer: BaseModule_T) -> None:
         super().__init__()
-
+        self._validate_base_layer(base_layer)
         self.base_layer = base_layer
         self.active_adapters = nn.ModuleDict()
         self.non_active_adapters = nn.ModuleDict()
@@ -351,7 +360,7 @@ class BaseAdaptedLayer(nn.Module, ABC, Generic[BaseModule_T]):
              and addition keys if exists.
 
         """
-        # todo: save adapter only one, and support load state dict with adapter name.in format {adapter_name}.lora_A
+        # todo: support load state dict with adapter name.in format {adapter_name}.lora_A
 
         if active_only and non_active_only:
             raise ValueError(
@@ -612,6 +621,16 @@ class BaseAdaptedLayer(nn.Module, ABC, Generic[BaseModule_T]):
                     f"base_layer has non-finite value in parameter `{name}`"
                 )
 
+class AdaptedLayer(BaseAdaptedLayer[BaseModule_T]):
+    
+    def _validate_base_layer(self, base_layer: nn.Module):
+        assert isinstance(base_layer,nn.Module)
+        assert hasattr(base_layer,"weight")
+        assert isinstance(base_layer.weight, torch.Tensor)
+        
+    def _update_base_layer(self, delta_weight: torch.Tensor, delta_bias: None | torch.Tensor) -> None:
+        if isinstance(self.base_layer.)
+
 
 class BaseModelAdaptionConfig(BaseModel, ABC):
     """
@@ -624,7 +643,7 @@ class BaseModelAdaptionConfig(BaseModel, ABC):
     2. Contain dispatch logic for construct LayerAdapter and replace it the base_layer .
     """
 
-    model_config = ConfigDict(
+    model_config:ClassVar[ConfigDict] = ConfigDict(
         validate_assignment=True, validate_default=True, arbitrary_types_allowed=True
     )
     adapter_name: str = Field("default")
