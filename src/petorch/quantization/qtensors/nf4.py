@@ -1,5 +1,6 @@
+__all__ = ["F4QTensor", "F4QConfig", "F4QState"]
 from functools import lru_cache
-from typing import Literal, override
+from typing import Literal, override, Self
 
 import torch
 from bitsandbytes import functional as F
@@ -7,10 +8,7 @@ from pydantic import Field
 from torch import Tensor
 
 from petorch import logger
-from .base import QTensor, QConfig, QState
-
-
-# bnb_ops = torch.ops.bitsandbytes
+from .base import QTensor, QState, _WrapperState, QConfig
 
 
 class F4QConfig(QConfig):
@@ -24,7 +22,7 @@ class F4QConfig(QConfig):
     """Dtype of scales storage, only float32 (default) has c++ kernel that increase performance for CPU."""
 
 
-class F4QState(QState):
+class F4QState(QState[F4QConfig]):
     quant_data: Tensor
     """The quantized of scaled data (ex: data is scaled to range [-1,1]). Hold index of the codebook."""
 
@@ -48,6 +46,7 @@ class F4QState(QState):
         *,
         memory_format: torch.memory_format | None = None,
     ) -> Tensor:
+
         # No use dtype
         return tensor.to(
             device=device,
@@ -57,17 +56,28 @@ class F4QState(QState):
         )
 
 
-class F4QTensor(QTensor[F4QConfig, F4QState]):
-    q_config_cls = F4QConfig
+class F4QTensor(QTensor[F4QState]):
     q_state_cls = F4QState
 
     @override
     @classmethod
-    def _quantize_high_precision(cls, hp_tensor: Tensor, config: F4QConfig) -> F4QState:
+    def from_high_precision(cls, hp_tensor: Tensor, config: F4QConfig) -> Self:
         """Double quantizes the high-precision tensor to 4-bits code-wise format."""
+        
+        # 0. Validation (Experiment)
+        assert torch.is_floating_point(hp_tensor)
+        # assert hp_tensor.is_contiguous()
+        # numel = hp_tensor.numel()
+        # if numel < config.block_size:
+        #     config.block_size = numel
+        # if numel < config.scale_block_size:
+        #     config.scale_block_size = numel
+        # assert hp_tensor.numel()>=256 # TODO: if <256, cause Segmentation Fault, dont know why
+        
         # 1. Quantize data -> data, data_scales
         # bitsandbytes.backends.default.ops.quantize_4bit
         # Flatten and quantize. Note that this method use CODE internally.
+
         deq_state: tuple[Tensor, Tensor] = torch.ops.bitsandbytes.quantize_4bit.default(
             hp_tensor,
             config.block_size,
@@ -87,8 +97,8 @@ class F4QTensor(QTensor[F4QConfig, F4QState]):
 
         deq_state2: tuple[Tensor, Tensor] = (
             torch.ops.bitsandbytes.quantize_blockwise.default(
-                (data_scales - data_scales_offset).to(scales_dtype),  # Residual
-                cls.get_double_quantize_code(device).to(scales_dtype),
+                (data_scales - data_scales_offset).to(scales_dtype).contiguous(),  # Residual
+                cls._get_double_quantize_code(device).to(scales_dtype).contiguous(),
                 config.scale_block_size,
             )
         )
@@ -101,8 +111,10 @@ class F4QTensor(QTensor[F4QConfig, F4QState]):
             quant_scale_res=quant_scale_res,
             residual_scales=residual_scales.to(scales_dtype),
             data_scales_offset=data_scales_offset.to(scales_dtype),
+            config=config,
         )
-        return states
+        states._wrapper_state = _WrapperState.from_data(hp_tensor)
+        return cls(_state=states)
 
     @override
     def _dequantize_high_precision(self) -> Tensor:
@@ -115,7 +127,7 @@ class F4QTensor(QTensor[F4QConfig, F4QState]):
         scale_res: Tensor = torch.ops.bitsandbytes.dequantize_blockwise.default(
             quant_state.quant_scale_res,
             quant_state.residual_scales,
-            self.get_double_quantize_code(device).to(scales_dtype),
+            self._get_double_quantize_code(device).to(scales_dtype),
             config.scale_block_size,
             scales_dtype,
         )
@@ -137,7 +149,8 @@ class F4QTensor(QTensor[F4QConfig, F4QState]):
 
     @classmethod
     @lru_cache(maxsize=None)
-    def get_double_quantize_code(cls, device: torch.device | str | None = None):
+    def _get_double_quantize_code(cls, device: torch.device | str | None = None):
+        # the default creates 256 values from [-1,1]
         # create_dynamic_map returns a CPU tensor, then move to the device
         tensor = F.create_dynamic_map().to(device=device)
         logger.debug(

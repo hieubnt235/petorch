@@ -1,0 +1,44 @@
+A= residual per scales(scales retuned after quantize)
+code = dynamic-code blocks, 256 values from -1 to 1
+
+# Case Fail: t = torch.randn([8, 8], device=device, dtype=dtype, requires_grad=requires_grad)
+
+A = {Tensor: (1,)} tensor([0.], grad_fn=<SubBackward0>)
+absmax = {Tensor: (1,)} tensor([2.9426e-18])
+code = {Tensor: (256,)} tensor([-1.0000e+00, -9.7891e-01, -9.6484e-01, -9.5078e-01, -9.3672e-01,\n        -9.2266e-01, -9.0859e-01, -8.9453e-01, -8.804...3e-01,  9.0859e-01,  9.2266e-01,\n         9.3672e-01,  9.5078e-01,  9.6484e-01,  9.7891e-01,  9.9297e-01,\n         1.0000e+00])
+out = {Tensor: (1,)} tensor([142], dtype=torch.uint8)
+blocks = {int} 1
+blocksize = {int} 256
+n = {int} 1
+
+
+# Case Success: t = torch.randn([16, 16], device=device, dtype=dtype, requires_grad=requires_grad)
+
+A = {Tensor: (4,)} tensor([-0.4292,  0.2603,  0.0571,  0.1118], grad_fn=<SubBackward0>)
+absmax = {Tensor: (1,)} tensor([159934.3438])
+code = {Tensor: (256,)} tensor([-1.0000e+00, -9.7891e-01, -9.6484e-01, -9.5078e-01, -9.3672e-01,\n        -9.2266e-01, -9.0859e-01, -8.9453e-01, -8.804...3e-01,  9.0859e-01,  9.2266e-01,\n         9.3672e-01,  9.5078e-01,  9.6484e-01,  9.7891e-01,  9.9297e-01,\n         1.0000e+00])
+out = {Tensor: (4,)} tensor([ 82, 170,  39,  72], dtype=torch.uint8)
+blocks = {int} 1
+blocksize = {int} 256
+n = {int} 4
+
+
+# Case Success: q3 = make_nf4(torch.empty_like(t))
+
+A = {Tensor: (4,)} tensor([ 0.0446, -0.0104, -0.0207, -0.0135])
+absmax = {Tensor: (1,)} tensor([2.9093e-26])
+blocks = {int} 1
+blocksize = {int} 256
+code = {Tensor: (256,)} tensor([-1.0000e+00, -9.7891e-01, -9.6484e-01, -9.5078e-01, -9.3672e-01,\n        -9.2266e-01, -9.0859e-01, -8.9453e-01, -8.804...3e-01,  9.0859e-01,  9.2266e-01,\n         9.3672e-01,  9.5078e-01,  9.6484e-01,  9.7891e-01,  9.9297e-01,\n         1.0000e+00])
+n = {int} 4
+out = {Tensor: (4,)} tensor([136, 209,  42,  21], dtype=torch.uint8)
+
+
+# Case Fail: q3 = make_nf4(torch.zeros_like(t))
+A = {Tensor: (4,)} tensor([0., 0., 0., 0.])
+absmax = {Tensor: (1,)} tensor([1.1553e-23])
+blocks = {int} 1
+blocksize = {int} 256
+code = {Tensor: (256,)} tensor([-1.0000e+00, -9.7891e-01, -9.6484e-01, -9.5078e-01, -9.3672e-01,\n        -9.2266e-01, -9.0859e-01, -8.9453e-01, -8.804...3e-01,  9.0859e-01,  9.2266e-01,\n         9.3672e-01,  9.5078e-01,  9.6484e-01,  9.7891e-01,  9.9297e-01,\n         1.0000e+00])
+n = {int} 4
+out = {Tensor: (4,)} tensor([ 68, 119,  95,  25], dtype=torch.uint8)

@@ -40,6 +40,7 @@ dependencies = [
     "transformers>=4.53.2",
     "trl>=0.19.1",
     "wheel>=0.45.1",
+    "wrapt>=1.17.3",
 ]
 
 
