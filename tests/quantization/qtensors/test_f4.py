@@ -117,7 +117,7 @@ def test_original_quantized_similar_attributes_and_values(device, dtype, require
     assert_similarity(t, deq)
     assert_similarity(nf4, deq, exclude=["sim"])
 
-    # Relative small tensor
+    # Relative small tensor ( tensor.numel()<<blocksize)
     # TODO: lower than 16x16 cause Segmentation Error. No clear reason.
     t = torch.randn([16, 16], device=device, dtype=dtype, requires_grad=requires_grad)
     nf4 = make_nf4(t)
@@ -176,7 +176,7 @@ def test_qtensor_copy_semantics(device, dtype, requires_grad):
 
     # --- Change dtype the copy_ copy values only, not device or dtype.
     q2 = q.to(device="cpu", dtype=bfloat16)
-
+    from bitsandbytes.functional import quantize_4bit
     # --- Support both methods.
     t2 = torch.empty_like(t)
     t3 = torch.empty_like(t)
@@ -185,12 +185,12 @@ def test_qtensor_copy_semantics(device, dtype, requires_grad):
     assert_similarity(t2, t)
     assert_similarity(t3, t)
     # #
-    # # # copy_ (QTensor <- torch)
-    # q3 = make_nf4(torch.empty_like(t))
+    # # copy_ (QTensor <- torch)
+    q3 = make_nf4(torch.empty_like(t))
     q3 = make_nf4(torch.zeros_like(t))
-    # q3.copy_(t)
-    # assert isinstance(q3, F4QTensor)
-    # assert_similarity(q3.get_high_precision(), t)
+    q3.copy_(t)
+    assert isinstance(q3, F4QTensor)
+    assert_similarity(q3.get_high_precision(), t)
     #
     #
     # # copy_ (QTensor <- QTensor)

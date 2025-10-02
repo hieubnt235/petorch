@@ -63,21 +63,27 @@ class F4QTensor(QTensor[F4QState]):
     @classmethod
     def from_high_precision(cls, hp_tensor: Tensor, config: F4QConfig) -> Self:
         """Double quantizes the high-precision tensor to 4-bits code-wise format."""
-        
-        # 0. Validation (Experiment)
+
+        # 0. Validation
         assert torch.is_floating_point(hp_tensor)
-        # assert hp_tensor.is_contiguous()
-        # numel = hp_tensor.numel()
-        # if numel < config.block_size:
-        #     config.block_size = numel
-        # if numel < config.scale_block_size:
-        #     config.scale_block_size = numel
-        # assert hp_tensor.numel()>=256 # TODO: if <256, cause Segmentation Fault, dont know why
-        
+        assert hp_tensor.isfinite().all()
+        assert hp_tensor.is_contiguous()
+
         # 1. Quantize data -> data, data_scales
         # bitsandbytes.backends.default.ops.quantize_4bit
         # Flatten and quantize. Note that this method use CODE internally.
 
+        # TODO: case for all elements in one block is zeros.
+        # Problem: When all elements in 1 block is zeros. So that the scale is 0, then the dev return nan in bnb code.
+        # Note that this nan tensor will be convert to uint8, and all become zeros so program cannot detect the nan,
+        # until it reach C++ code.
+        # Solution:
+        # 1. Prevalidating
+        # 2. Hack (Treat the all-zero blocks case (cause absmax=0) separately to the bnb kernel)
+        # 3. Rewrite the kernel
+        
+        
+        
         deq_state: tuple[Tensor, Tensor] = torch.ops.bitsandbytes.quantize_4bit.default(
             hp_tensor,
             config.block_size,
@@ -86,6 +92,8 @@ class F4QTensor(QTensor[F4QState]):
         )
         # shape (flatten_shape, 1), (ceil(flatten_shape/block_size), )
         quant_data, data_scales = deq_state
+
+        assert len(data_scales.shape) == 1
         assert quant_data.device == hp_tensor.device == data_scales.device
 
         # 2. Quantize data scales residual ->  quant_scale_res, residual_scales, data_scales_offset
@@ -93,12 +101,20 @@ class F4QTensor(QTensor[F4QState]):
         # Quantize the scale residuals
         device = data_scales.device
         scales_dtype = config.scales_dtype
-        data_scales_offset = data_scales.mean()
 
+        # Residual can be zero if num_block is 1 ( hp_tensor.numel()<=block_size)
+        # so that the offset scale is scalar and is close to zero, that cause segment fault.
+        # https://github.com/bitsandbytes-foundation/bitsandbytes/issues/1744
+        # I treat this case separately.
+
+        data_scales_offset = data_scales.mean()
+        scale_res = data_scales - data_scales_offset
+
+        assert scale_res.shape == data_scales.shape
         deq_state2: tuple[Tensor, Tensor] = (
             torch.ops.bitsandbytes.quantize_blockwise.default(
-                (data_scales - data_scales_offset).to(scales_dtype).contiguous(),  # Residual
-                cls._get_double_quantize_code(device).to(scales_dtype).contiguous(),
+                scale_res.to(scales_dtype),  # Residual
+                cls._get_double_quantize_code(device).to(scales_dtype),
                 config.scale_block_size,
             )
         )
@@ -106,6 +122,7 @@ class F4QTensor(QTensor[F4QState]):
 
         # 3. Store states, no need to store the data_scales for double quantization.
         del data_scales
+        del scale_res
         states = F4QState(
             quant_data=quant_data,
             quant_scale_res=quant_scale_res,

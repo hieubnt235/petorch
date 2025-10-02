@@ -1,8 +1,7 @@
-import faulthandler
+import  os
+os.environ["TORCHDYNAMO_DISABLE"] = "1"
 
 from torch import Tensor
-
-faulthandler.enable()
 
 import torch
 from petorch.quantization.qtensors.nf4 import (
@@ -16,9 +15,13 @@ def make_nf4(tensor: Tensor, config: F4QConfig | None = None) -> F4QTensor:
     nf4 = F4QTensor.from_high_precision(tensor, config)
     assert torch.all(torch.isfinite(nf4.get_high_precision()))
     return nf4
+from bitsandbytes.backends.default.ops import *
 
+def _abc():
+    t = torch.randn([16, 16], device="cpu")
+    q = make_nf4(torch.zeros_like(t))# This will cause seg fault
 
-t = torch.randn([16, 16], dtype=torch.float32, device="cpu")
-print("before make_nf4")
-q = make_nf4(t)
-print("after make_nf4", type(q))
+    for _,ts in q.iter_tensors():
+        print(ts.isfinite().all(), ts.abs().max())
+
+_abc()
